@@ -7,4 +7,6 @@ require (
 	github.com/google/uuid v1.6.0
 )
 
+require github.com/smnsjas/go-psrpcore v0.0.0-20251224034619-517dc56730eb
+
 replace github.com/smnsjas/go-psrpcore => ../go-psrpcore
