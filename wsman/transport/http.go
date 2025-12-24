@@ -33,6 +33,10 @@ func NewHTTPTransport(opts ...HTTPTransportOption) *HTTPTransport {
 			Timeout: DefaultTimeout,
 			Transport: &http.Transport{
 				TLSClientConfig: &tls.Config{
+					// MinVersion: TLS 1.2 for compatibility with older Windows servers
+					// MaxVersion: Not set - allows TLS 1.3 (Go default)
+					// CipherSuites: Not set for TLS 1.3 - Go manages secure defaults
+					// For TLS 1.2, Go defaults to secure cipher suites
 					MinVersion: tls.VersionTLS12,
 				},
 			},

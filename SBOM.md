@@ -41,7 +41,33 @@ The generated `sbom.json` should be included with each release.
 
 | Package | Version | License | Purpose | Status |
 |---------|---------|---------|---------|--------|
-| `github.com/jcmturner/gokrb5/v8` | v8.x | Apache-2.0 | Kerberos auth | ✅ Active |
+| Kerberos TBD | - | - | Kerberos auth | ⚠️ Evaluating options |
+
+### Kerberos Library Evaluation (Dec 2024)
+
+| Library | Status | Notes |
+|---------|--------|-------|
+| `jcmturner/gokrb5/v8` | ⚠️ Unmaintained | 0 commits in 90 days, last release Feb 2023 |
+| `golang-auth/go-gssapi` | ⚠️ Beta | v3 API unstable, not production ready |
+| `dpotapov/go-spnego` | ✅ Wrapper | Wraps gokrb5 (Linux) + SSPI (Windows) |
+
+**Recommendation**: Defer Kerberos implementation until a stable library emerges, or use platform-specific approaches (SSPI on Windows).
+
+---
+
+## TLS Security Configuration
+
+| Setting | Value | Rationale |
+|---------|-------|-----------|
+| MinVersion | TLS 1.2 | Compatibility with older Windows servers |
+| MaxVersion | Not set | Allows TLS 1.3 (Go default) |
+| CipherSuites | Not set | Go manages secure defaults for TLS 1.2/1.3 |
+
+**TLS 1.3 Notes**:
+
+- All TLS 1.3 cipher suites are secure; Go manages them automatically
+- Go prioritizes AES-GCM on hardware-accelerated CPUs, ChaCha20-Poly1305 otherwise
+- Forward secrecy is guaranteed in TLS 1.3
 
 ---
 
