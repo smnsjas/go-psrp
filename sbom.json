@@ -1,0 +1,67 @@
+{
+  "$schema": "http://cyclonedx.org/schema/bom-1.6.schema.json",
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "serialNumber": "urn:uuid:b6f3827c-de09-45d2-b16c-455148132876",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2025-12-24T11:53:33-05:00",
+    "tools": [
+      {
+        "vendor": "CycloneDX",
+        "name": "cyclonedx-gomod",
+        "version": "v1.9.0",
+        "hashes": [
+          {
+            "alg": "MD5",
+            "content": "c02abc0123597ab6fe8a141f6d628932"
+          },
+          {
+            "alg": "SHA-1",
+            "content": "d43fbda9682e74b510291ec0fbc8ebfcbd5d3b58"
+          },
+          {
+            "alg": "SHA-256",
+            "content": "b1229c11abf31bf9601e4b5346ce13cf52cc9b943772a74c50e1e1767651f8a5"
+          },
+          {
+            "alg": "SHA-384",
+            "content": "22d6bc8829d6e61c93d7d8391a513515aafa7fb5c52fbd52ad3a5c485d5b1c1884285c747e732988d8f39dcf379d39cd"
+          },
+          {
+            "alg": "SHA-512",
+            "content": "046959a9e7100ac26621b1d1beb764d0202acd69d34f112a96b070cdf19d6ce5d6a908a7a58a91ccde68379cbb5d4f82f00a1e2aaf91d23b501506ec819f5f0e"
+          }
+        ],
+        "externalReferences": [
+          {
+            "url": "https://github.com/CycloneDX/cyclonedx-gomod",
+            "type": "vcs"
+          },
+          {
+            "url": "https://cyclonedx.org",
+            "type": "website"
+          }
+        ]
+      }
+    ],
+    "component": {
+      "bom-ref": "pkg:golang/github.com/smnsjas/go-psrp@v0.0.0-20251224163556-3aa733b3b9fe?type=module",
+      "type": "application",
+      "name": "github.com/smnsjas/go-psrp",
+      "version": "v0.0.0-20251224163556-3aa733b3b9fe",
+      "purl": "pkg:golang/github.com/smnsjas/go-psrp@v0.0.0-20251224163556-3aa733b3b9fe?type=module\u0026goos=darwin\u0026goarch=arm64",
+      "externalReferences": [
+        {
+          "url": "https://github.com/smnsjas/go-psrp",
+          "type": "vcs"
+        }
+      ]
+    }
+  },
+  "dependencies": [
+    {
+      "ref": "pkg:golang/github.com/smnsjas/go-psrp@v0.0.0-20251224163556-3aa733b3b9fe?type=module"
+    }
+  ]
+}
