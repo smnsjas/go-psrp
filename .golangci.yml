@@ -1,0 +1,54 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters-settings:
+  govet:
+    shadow: true
+  gocyclo:
+    min-complexity: 15
+  dupl:
+    threshold: 100
+  goconst:
+    min-len: 2
+    min-occurrences: 2
+  misspell:
+    locale: US
+  lll:
+    line-length: 120
+  goimports:
+    local-prefixes:
+      - github.com/smnsjas/go-psrp
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - experimental
+      - opinionated
+      - performance
+      - style
+    disabled-checks:
+      - wrapperFunc
+      - ifElseChain
+      - octalLiteral
+
+linters:
+  enable:
+    - govet
+    - revive
+    - gosec
+    - gocyclo
+    - unconvert
+    - goconst
+    - misspell
+    - lll
+    - unparam
+    - ineffassign
+    - staticcheck
+  disable:
+    - errcheck
+
+issues:
+  exclude-use-default: false
+  max-issues-per-linter: 0
+  max-same-issues: 0
