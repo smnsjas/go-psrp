@@ -8,10 +8,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/smnsjas/go-psrp/powershell"
 	"github.com/smnsjas/go-psrp/wsman"
 	"github.com/smnsjas/go-psrp/wsman/auth"
 	"github.com/smnsjas/go-psrp/wsman/transport"
+	"github.com/smnsjas/go-psrpcore/runspace"
 )
 
 // AuthType specifies the authentication mechanism.
@@ -81,11 +83,14 @@ type Client struct {
 	config   Config
 	endpoint string
 
-	transport *transport.HTTPTransport
-	wsman     *wsman.Client
-	pool      *powershell.RunspacePool
-	connected bool
-	closed    bool
+	transport     *transport.HTTPTransport
+	wsman         *wsman.Client
+	pool          *powershell.RunspacePool
+	psrpPool      *runspace.Pool
+	psrpTransport *powershell.WSManTransport
+	poolID        uuid.UUID
+	connected     bool
+	closed        bool
 }
 
 // New creates a new PSRP client.
@@ -151,10 +156,36 @@ func (c *Client) Connect(ctx context.Context) error {
 		return nil
 	}
 
-	// Create runspace pool wrapper
+	// 1. Create WSMan shell (this gives us shell ID for command operations)
 	c.pool = powershell.NewRunspacePool(c.wsman)
 	if err := c.pool.Open(ctx); err != nil {
-		return fmt.Errorf("open runspace pool: %w", err)
+		return fmt.Errorf("open wsman shell: %w", err)
+	}
+
+	// 2. Create WSMan command (this gives us command ID for PSRP transport)
+	pipeline, err := c.pool.CreatePipeline(ctx)
+	if err != nil {
+		_ = c.pool.Close(ctx) // Best-effort cleanup
+		return fmt.Errorf("create wsman command: %w", err)
+	}
+
+	// 3. Create WSManTransport that bridges WSMan to io.ReadWriter
+	c.psrpTransport = powershell.NewWSManTransport(
+		c.wsman,
+		c.pool.ShellID(),
+		pipeline.CommandID(),
+	)
+	c.psrpTransport.SetContext(ctx)
+
+	// 4. Create go-psrpcore Pool using our WSManTransport
+	c.poolID = uuid.New()
+	c.psrpPool = runspace.New(c.psrpTransport, c.poolID)
+
+	// 5. Open the PSRP pool (performs SESSION_CAPABILITY exchange)
+	if err := c.psrpPool.Open(ctx); err != nil {
+		_ = pipeline.Close(ctx) // Best-effort cleanup
+		_ = c.pool.Close(ctx)   // Best-effort cleanup
+		return fmt.Errorf("open psrp pool: %w", err)
 	}
 
 	c.connected = true
@@ -213,27 +244,52 @@ func (c *Client) Execute(ctx context.Context, script string) (*Result, error) {
 		c.mu.Unlock()
 		return nil, errors.New("client is closed")
 	}
-	pool := c.pool
+	psrpPool := c.psrpPool
 	c.mu.Unlock()
 
-	// Create a pipeline for this execution
-	pipeline, err := pool.CreatePipeline(ctx)
+	// Create a go-psrpcore pipeline for this execution
+	pipeline, err := psrpPool.CreatePipeline(script)
 	if err != nil {
 		return nil, fmt.Errorf("create pipeline: %w", err)
 	}
-	defer pipeline.Close(ctx)
 
-	// Get the io.ReadWriter adapter
-	adapter := pipeline.GetAdapter()
-	adapter.SetContext(ctx)
-
-	// For now, we return a placeholder result
-	// Full go-psrpcore integration requires sending/receiving PSRP fragments
-	// which will be implemented in the integration phase
-	result := &Result{
-		Output:    []byte(script), // Placeholder
-		HadErrors: false,
+	// Invoke the pipeline (sends CREATE_PIPELINE message)
+	if err := pipeline.Invoke(ctx); err != nil {
+		return nil, fmt.Errorf("invoke pipeline: %w", err)
 	}
 
-	return result, nil
+	// Close input (we're not sending piped input)
+	if err := pipeline.CloseInput(ctx); err != nil {
+		return nil, fmt.Errorf("close input: %w", err)
+	}
+
+	// Collect output
+	var output []byte
+	var errors []byte
+	var hadErrors bool
+
+	// Read from output channel
+	for msg := range pipeline.Output() {
+		output = append(output, msg.Data...)
+	}
+
+	// Read from error channel
+	for msg := range pipeline.Error() {
+		errors = append(errors, msg.Data...)
+		hadErrors = true
+	}
+
+	// Wait for completion
+	if err := pipeline.Wait(); err != nil {
+		hadErrors = true
+		if len(errors) == 0 {
+			errors = []byte(err.Error())
+		}
+	}
+
+	return &Result{
+		Output:    output,
+		Errors:    errors,
+		HadErrors: hadErrors,
+	}, nil
 }
