@@ -45,14 +45,33 @@ The generated `sbom.json` should be included with each release.
 
 ### Kerberos Library Evaluation (Dec 2024)
 
-| Library | Status | Notes |
-|---------|--------|-------|
-| `jcmturner/gokrb5/v8` | ⚠️ Unmaintained | 0 commits in 90 days, last release Feb 2023 |
-| `golang-auth/go-gssapi` | ⚠️ Beta | v3 API unstable, not production ready |
-| `dpotapov/go-spnego` | ⚠️ Unmaintained | Last commit Apr 2022, wraps gokrb5 |
-| `alexbrainman/sspi` | ✅ Windows-only | Uses native Windows SSPI for Negotiate |
+| Library | Status | Platform Support |
+|---------|--------|------------------|
+| `jcmturner/gokrb5/v8` | ⚠️ Unmaintained | All (pure Go) |
+| `golang-auth/go-gssapi` v3 | 🔄 **Active (Beta)** | Linux, macOS (via C bindings) |
+| `golang-auth/go-gssapi-c` | 🔄 **Active** | Linux (MIT/Heimdal), macOS (Apple/MIT/Heimdal) |
+| `dpotapov/go-spnego` | ⚠️ Unmaintained | All (wraps gokrb5) |
+| `alexbrainman/sspi` | ✅ Stable | Windows only (native SSPI) |
 
-**Recommendation**: Defer Kerberos implementation until ecosystem matures. For Windows-only deployments, `alexbrainman/sspi` is the most viable option as it uses native OS APIs.
+### go-gssapi Cross-Platform Details
+
+| Platform | GSSAPI Provider | Notes |
+|----------|-----------------|-------|
+| **Linux** | MIT Kerberos, Heimdal | Requires `libkrb5-dev` or equivalent |
+| **macOS** | Apple Kerberos (default), MIT, Heimdal | Apple Kerberos is Heimdal fork |
+| **Windows** | ❌ Not supported | Windows uses SSPI, not GSSAPI |
+
+**go-gssapi Requirements**:
+
+- `cgo` enabled (C compiler required)
+- System GSSAPI libraries installed
+- `pkg-config` for library detection
+
+**Recommendation**:
+
+- **Linux/macOS**: `golang-auth/go-gssapi` v3 with `go-gssapi-c` provider (beta but actively developed)
+- **Windows**: `alexbrainman/sspi` for native SSPI/Negotiate support
+- **Cross-platform binary**: Build separately for each platform, or defer Kerberos support
 
 ---
 
