@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"sync"
+
+	"github.com/smnsjas/go-psrp/wsman"
 )
 
 // PoolClient defines the WSMan operations needed by RunspacePool.
@@ -12,7 +14,7 @@ type PoolClient interface {
 	Delete(ctx context.Context, shellID string) error
 	Command(ctx context.Context, shellID, arguments string) (string, error)
 	Send(ctx context.Context, shellID, commandID, stream string, data []byte) error
-	Receive(ctx context.Context, shellID, commandID string) (*ReceiveResult, error)
+	Receive(ctx context.Context, shellID, commandID string) (*wsman.ReceiveResult, error)
 	Signal(ctx context.Context, shellID, commandID, code string) error
 }
 
