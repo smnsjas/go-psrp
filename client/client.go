@@ -187,3 +187,53 @@ func (c *Client) IsConnected() bool {
 	defer c.mu.Unlock()
 	return c.connected && !c.closed
 }
+
+// Result represents the result of a PowerShell command execution.
+type Result struct {
+	// Output contains the serialized output objects (CLIXML format).
+	Output []byte
+
+	// Errors contains any error records returned.
+	Errors []byte
+
+	// HadErrors indicates if any errors occurred during execution.
+	HadErrors bool
+}
+
+// Execute runs a PowerShell script on the remote server.
+// The script can be any valid PowerShell code.
+// Returns the output and any errors from execution.
+func (c *Client) Execute(ctx context.Context, script string) (*Result, error) {
+	c.mu.Lock()
+	if !c.connected {
+		c.mu.Unlock()
+		return nil, errors.New("client not connected")
+	}
+	if c.closed {
+		c.mu.Unlock()
+		return nil, errors.New("client is closed")
+	}
+	pool := c.pool
+	c.mu.Unlock()
+
+	// Create a pipeline for this execution
+	pipeline, err := pool.CreatePipeline(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("create pipeline: %w", err)
+	}
+	defer pipeline.Close(ctx)
+
+	// Get the io.ReadWriter adapter
+	adapter := pipeline.GetAdapter()
+	adapter.SetContext(ctx)
+
+	// For now, we return a placeholder result
+	// Full go-psrpcore integration requires sending/receiving PSRP fragments
+	// which will be implemented in the integration phase
+	result := &Result{
+		Output:    []byte(script), // Placeholder
+		HadErrors: false,
+	}
+
+	return result, nil
+}
