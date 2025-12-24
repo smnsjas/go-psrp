@@ -3,6 +3,7 @@ package integration
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"sync"
 	"testing"
@@ -78,7 +79,49 @@ func (m *MockPSRPTransport) generateResponse(msg *messages.Message) {
 		m.queueSessionCapabilityResponse()
 	case messages.MessageTypeInitRunspacePool:
 		m.queueRunspacePoolStateResponse()
+	case messages.MessageTypeCreatePipeline:
+		// Queue PIPELINE_STATE (Running) then (Completed) responses
+		m.queuePipelineStateResponse(msg.PipelineID, messages.PipelineStateRunning)
+		m.queuePipelineOutputResponse(msg.PipelineID, "Hello from mock!")
+		m.queuePipelineStateResponse(msg.PipelineID, messages.PipelineStateCompleted)
 	}
+}
+
+// queuePipelineStateResponse adds a PIPELINE_STATE response.
+func (m *MockPSRPTransport) queuePipelineStateResponse(pipelineID uuid.UUID, state messages.PipelineState) {
+	// State data as CLIXML - just the state integer
+	stateData := []byte(fmt.Sprintf(
+		`<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">`+
+			`<Obj RefId="0"><MS><I32 N="PipelineState">%d</I32></MS></Obj></Objs>`,
+		state))
+
+	msg := &messages.Message{
+		Destination: messages.DestinationClient,
+		Type:        messages.MessageTypePipelineState,
+		RunspaceID:  m.poolID,
+		PipelineID:  pipelineID,
+		Data:        stateData,
+	}
+
+	m.queueMessage(msg)
+}
+
+// queuePipelineOutputResponse adds a PIPELINE_OUTPUT response with mock data.
+func (m *MockPSRPTransport) queuePipelineOutputResponse(pipelineID uuid.UUID, output string) {
+	// Output as serialized string
+	outputData := []byte(fmt.Sprintf(
+		`<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><S>%s</S></Objs>`,
+		output))
+
+	msg := &messages.Message{
+		Destination: messages.DestinationClient,
+		Type:        messages.MessageTypePipelineOutput,
+		RunspaceID:  m.poolID,
+		PipelineID:  pipelineID,
+		Data:        outputData,
+	}
+
+	m.queueMessage(msg)
 }
 
 // queueSessionCapabilityResponse adds a SESSION_CAPABILITY response.
@@ -268,4 +311,32 @@ func TestMockPSRPTransport_GeneratesResponses(t *testing.T) {
 	if respMsg.Destination != messages.DestinationClient {
 		t.Errorf("Response destination = %v, want DestinationClient", respMsg.Destination)
 	}
+}
+
+// TestPSRPCore_PipelineExecution tests pipeline creation and execution.
+func TestPSRPCore_PipelineExecution(t *testing.T) {
+	poolID := uuid.New()
+	transport := NewMockPSRPTransport(poolID)
+
+	pool := runspace.New(transport, poolID)
+
+	ctx := context.Background()
+
+	err := pool.Open(ctx)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer pool.Close(ctx)
+
+	// Create a pipeline
+	pl, err := pool.CreatePipeline("Write-Output 'Hello'")
+	if err != nil {
+		t.Fatalf("CreatePipeline failed: %v", err)
+	}
+
+	if pl == nil {
+		t.Fatal("pipeline is nil")
+	}
+
+	t.Logf("Pipeline created with ID: %v", pl.ID())
 }
