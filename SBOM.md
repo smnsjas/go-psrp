@@ -53,6 +53,36 @@ The generated `sbom.json` should be included with each release.
 | `dpotapov/go-spnego` | ⚠️ Unmaintained | All (wraps gokrb5) |
 | `alexbrainman/sspi` | ✅ Stable | Windows only (native SSPI) |
 
+### Rust Alternative: sspi-rs (Devolutions)
+
+| Feature | Details |
+|---------|---------|
+| **Library** | [`Devolutions/sspi-rs`](https://github.com/Devolutions/sspi-rs) |
+| **Status** | ✅ **Actively maintained** (30 contributors, production use) |
+| **License** | MIT or Apache-2.0 |
+| **Protocols** | NTLM, Kerberos, Negotiate (SPNEGO) |
+| **Platform** | ✅ **Cross-platform** (Windows, Linux, macOS) |
+| **Pure Rust** | ✅ No C dependencies for core functionality |
+
+**Production Users**: Devolutions Gateway, IronRDP, pyspnego, NetExec, Remote Desktop Manager
+
+### Go ↔ Rust Interop Options
+
+| Method | Pros | Cons |
+|--------|------|------|
+| **cgo + C ABI** | Standard approach | Requires C compiler, complicates build |
+| **UniFFI** | Auto-generates bindings | Third-party Go support |
+| **Purego** | No cgo, dynamic loading | Runtime overhead |
+| **WebAssembly** | Portable, no cgo | WASM runtime overhead |
+
+**Recommendation**:
+For true cross-platform Kerberos, `sspi-rs` via Rust FFI is the most promising option:
+
+- ✅ Pure Rust (no C dependencies)
+- ✅ Cross-platform (Windows, Linux, macOS)
+- ✅ Actively maintained by Devolutions
+- ⚠️ Requires Rust FFI integration (cgo or purego)
+
 ### go-gssapi Cross-Platform Details
 
 | Platform | GSSAPI Provider | Notes |
