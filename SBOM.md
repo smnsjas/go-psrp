@@ -49,9 +49,10 @@ The generated `sbom.json` should be included with each release.
 |---------|--------|-------|
 | `jcmturner/gokrb5/v8` | ⚠️ Unmaintained | 0 commits in 90 days, last release Feb 2023 |
 | `golang-auth/go-gssapi` | ⚠️ Beta | v3 API unstable, not production ready |
-| `dpotapov/go-spnego` | ✅ Wrapper | Wraps gokrb5 (Linux) + SSPI (Windows) |
+| `dpotapov/go-spnego` | ⚠️ Unmaintained | Last commit Apr 2022, wraps gokrb5 |
+| `alexbrainman/sspi` | ✅ Windows-only | Uses native Windows SSPI for Negotiate |
 
-**Recommendation**: Defer Kerberos implementation until a stable library emerges, or use platform-specific approaches (SSPI on Windows).
+**Recommendation**: Defer Kerberos implementation until ecosystem matures. For Windows-only deployments, `alexbrainman/sspi` is the most viable option as it uses native OS APIs.
 
 ---
 
