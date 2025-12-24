@@ -220,14 +220,19 @@ func (c *Client) IsConnected() bool {
 }
 
 // Result represents the result of a PowerShell command execution.
+// Currently supports Output and Error streams from the pipeline.
+// Note: Warning, Verbose, Debug, and Progress streams require
+// go-psrpcore enhancements and are not yet exposed.
 type Result struct {
-	// Output contains the serialized output objects (CLIXML format).
+	// Output contains the CLIXML-serialized output objects from the pipeline.
+	// Use go-psrpcore/serialization.Deserializer to parse into Go types.
 	Output []byte
 
-	// Errors contains any error records returned.
+	// Errors contains CLIXML-serialized ErrorRecord objects.
+	// Populated when PowerShell writes to the error stream (non-terminating errors).
 	Errors []byte
 
-	// HadErrors indicates if any errors occurred during execution.
+	// HadErrors is true if any error records were received or the pipeline failed.
 	HadErrors bool
 }
 
