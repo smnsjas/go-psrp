@@ -6,19 +6,14 @@ import (
 	"context"
 	"io"
 	"sync"
+
+	"github.com/smnsjas/go-psrp/wsman"
 )
 
 // WSManClient defines the WSMan operations needed by the adapter.
 type WSManClient interface {
 	Send(ctx context.Context, shellID, commandID, stream string, data []byte) error
-	Receive(ctx context.Context, shellID, commandID string) (*ReceiveResult, error)
-}
-
-// ReceiveResult contains the result of a WSMan Receive operation.
-type ReceiveResult struct {
-	Stdout []byte
-	Stderr []byte
-	Done   bool
+	Receive(ctx context.Context, shellID, commandID string) (*wsman.ReceiveResult, error)
 }
 
 // Adapter bridges WSMan's request/response model to go-psrpcore's io.ReadWriter interface.

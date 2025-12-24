@@ -3,6 +3,8 @@ package powershell
 import (
 	"context"
 	"testing"
+
+	"github.com/smnsjas/go-psrp/wsman"
 )
 
 // mockWSManClientForPool extends mockWSManClient for pool tests.
@@ -34,8 +36,8 @@ func (m *mockWSManClientForPool) Send(_ context.Context, _, _, _ string, _ []byt
 	return nil
 }
 
-func (m *mockWSManClientForPool) Receive(_ context.Context, _, _ string) (*ReceiveResult, error) {
-	return &ReceiveResult{}, nil
+func (m *mockWSManClientForPool) Receive(_ context.Context, _, _ string) (*wsman.ReceiveResult, error) {
+	return &wsman.ReceiveResult{}, nil
 }
 
 func (m *mockWSManClientForPool) Signal(_ context.Context, _, _, _ string) error {

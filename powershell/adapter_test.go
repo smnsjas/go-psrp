@@ -6,6 +6,8 @@ import (
 	"io"
 	"testing"
 	"time"
+
+	"github.com/smnsjas/go-psrp/wsman"
 )
 
 // mockWSManClient is a test double for WSMan operations.
@@ -20,8 +22,8 @@ func (m *mockWSManClient) Send(_ context.Context, _, _, _ string, data []byte) e
 	return nil
 }
 
-func (m *mockWSManClient) Receive(_ context.Context, _, _ string) (*ReceiveResult, error) {
-	return &ReceiveResult{
+func (m *mockWSManClient) Receive(_ context.Context, _, _ string) (*wsman.ReceiveResult, error) {
+	return &wsman.ReceiveResult{
 		Stdout: m.receiveData,
 		Done:   m.receiveDone,
 	}, nil
