@@ -2,10 +2,10 @@
   "$schema": "http://cyclonedx.org/schema/bom-1.6.schema.json",
   "bomFormat": "CycloneDX",
   "specVersion": "1.6",
-  "serialNumber": "urn:uuid:b6f3827c-de09-45d2-b16c-455148132876",
+  "serialNumber": "urn:uuid:b97acd85-92fe-4a26-85e9-8c635156201a",
   "version": 1,
   "metadata": {
-    "timestamp": "2025-12-24T11:53:33-05:00",
+    "timestamp": "2025-12-24T12:44:17-05:00",
     "tools": [
       {
         "vendor": "CycloneDX",
@@ -46,11 +46,11 @@
       }
     ],
     "component": {
-      "bom-ref": "pkg:golang/github.com/smnsjas/go-psrp@v0.0.0-20251224163556-3aa733b3b9fe?type=module",
+      "bom-ref": "pkg:golang/github.com/smnsjas/go-psrp@v0.0.0-20251224174410-eee1b10f3caa?type=module",
       "type": "application",
       "name": "github.com/smnsjas/go-psrp",
-      "version": "v0.0.0-20251224163556-3aa733b3b9fe",
-      "purl": "pkg:golang/github.com/smnsjas/go-psrp@v0.0.0-20251224163556-3aa733b3b9fe?type=module\u0026goos=darwin\u0026goarch=arm64",
+      "version": "v0.0.0-20251224174410-eee1b10f3caa",
+      "purl": "pkg:golang/github.com/smnsjas/go-psrp@v0.0.0-20251224174410-eee1b10f3caa?type=module\u0026goos=darwin\u0026goarch=arm64",
       "externalReferences": [
         {
           "url": "https://github.com/smnsjas/go-psrp",
@@ -59,9 +59,61 @@
       ]
     }
   },
+  "components": [
+    {
+      "bom-ref": "pkg:golang/github.com/Azure/go-ntlmssp@v0.1.0?type=module",
+      "type": "library",
+      "name": "github.com/Azure/go-ntlmssp",
+      "version": "v0.1.0",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "0e3168e98b56ccda8dbd076bc04cabfdee27854def462c1e9f3e505fbb05cfe0"
+        }
+      ],
+      "purl": "pkg:golang/github.com/Azure/go-ntlmssp@v0.1.0?type=module\u0026goos=darwin\u0026goarch=arm64",
+      "externalReferences": [
+        {
+          "url": "https://github.com/Azure/go-ntlmssp",
+          "type": "vcs"
+        }
+      ]
+    },
+    {
+      "bom-ref": "pkg:golang/github.com/google/uuid@v1.6.0?type=module",
+      "type": "library",
+      "name": "github.com/google/uuid",
+      "version": "v1.6.0",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "348bda24330eb231c0f27d630212d2833ac0cf2d4782bfa136b6f9edefbde05d"
+        }
+      ],
+      "purl": "pkg:golang/github.com/google/uuid@v1.6.0?type=module\u0026goos=darwin\u0026goarch=arm64",
+      "externalReferences": [
+        {
+          "url": "https://github.com/google/uuid",
+          "type": "vcs"
+        }
+      ]
+    }
+  ],
   "dependencies": [
     {
-      "ref": "pkg:golang/github.com/smnsjas/go-psrp@v0.0.0-20251224163556-3aa733b3b9fe?type=module"
+      "ref": "pkg:golang/github.com/smnsjas/go-psrp@v0.0.0-20251224174410-eee1b10f3caa?type=module",
+      "dependsOn": [
+        "pkg:golang/github.com/Azure/go-ntlmssp@v0.1.0?type=module",
+        "pkg:golang/github.com/google/uuid@v1.6.0?type=module"
+      ]
+    },
+    {
+      "ref": "pkg:golang/github.com/Azure/go-ntlmssp@v0.1.0?type=module"
+    },
+    {
+      "ref": "pkg:golang/github.com/google/uuid@v1.6.0?type=module"
     }
   ]
 }
