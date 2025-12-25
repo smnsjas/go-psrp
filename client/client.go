@@ -3,6 +3,7 @@ package client
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"sync"
@@ -156,32 +157,42 @@ func (c *Client) Connect(ctx context.Context) error {
 		return nil
 	}
 
-	// 1. Create WSMan shell (this gives us shell ID for command operations)
+	// 1. Setup PSRP Pool logic EARLY
+	// Create unconfigured transport first so we can create PSRP pool
+	c.psrpTransport = powershell.NewWSManTransport(nil, "", "")
+	c.psrpTransport.SetContext(ctx)
+
+	// Create go-psrpcore Pool using our (currently unconfigured) transport
+	c.poolID = uuid.New()
+	c.psrpPool = runspace.New(c.psrpTransport, c.poolID)
+
+	// Get the PSRP handshake fragments to embed in creationXml
+	frags, err := c.psrpPool.GetHandshakeFragments()
+	if err != nil {
+		return fmt.Errorf("get handshake fragments: %w", err)
+	}
+	creationXml := base64.StdEncoding.EncodeToString(frags)
+
+	// 2. Create WSMan shell with creationXml
+	// This performs the PSRP handshake (SessionCapability + InitRunspacePool)
 	c.pool = powershell.NewRunspacePool(c.wsman)
-	if err := c.pool.Open(ctx); err != nil {
+	if err := c.pool.Open(ctx, creationXml); err != nil {
 		return fmt.Errorf("open wsman shell: %w", err)
 	}
 
-	// 2. Create WSMan command (this gives us command ID for PSRP transport)
+	// 3. Create WSMan command (Pipeline) for the PSRP transport
 	pipeline, err := c.pool.CreatePipeline(ctx)
 	if err != nil {
 		_ = c.pool.Close(ctx) // Best-effort cleanup
 		return fmt.Errorf("create wsman command: %w", err)
 	}
 
-	// 3. Create WSManTransport that bridges WSMan to io.ReadWriter
-	c.psrpTransport = powershell.NewWSManTransport(
-		c.wsman,
-		c.pool.ShellID(),
-		pipeline.CommandID(),
-	)
-	c.psrpTransport.SetContext(ctx)
+	// 4. Configure the Transport with the real ShellID and CommandID
+	c.psrpTransport.Configure(c.wsman, c.pool.ShellID(), pipeline.CommandID())
 
-	// 4. Create go-psrpcore Pool using our WSManTransport
-	c.poolID = uuid.New()
-	c.psrpPool = runspace.New(c.psrpTransport, c.poolID)
-
-	// 5. Open the PSRP pool (performs SESSION_CAPABILITY exchange)
+	// 5. Open the PSRP pool (Skipping invalid initial sends)
+	// We set SkipHandshakeSend because we already sent the handshake in creationXml
+	c.psrpPool.SkipHandshakeSend = true
 	if err := c.psrpPool.Open(ctx); err != nil {
 		_ = pipeline.Close(ctx) // Best-effort cleanup
 		_ = c.pool.Close(ctx)   // Best-effort cleanup
