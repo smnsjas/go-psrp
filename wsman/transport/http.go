@@ -112,6 +112,22 @@ func (t *HTTPTransport) Post(ctx context.Context, url string, body []byte) ([]by
 		return nil, fmt.Errorf("transport: failed to read response: %w", err)
 	}
 
+	// Check HTTP status code
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, fmt.Errorf("transport: authentication failed (401 Unauthorized)")
+	}
+	if resp.StatusCode == http.StatusForbidden {
+		return nil, fmt.Errorf("transport: access denied (403 Forbidden)")
+	}
+	if resp.StatusCode >= 400 {
+		// Include response body in error for debugging
+		bodyPreview := string(respBody)
+		if len(bodyPreview) > 3000 {
+			bodyPreview = bodyPreview[:3000] + "..."
+		}
+		return nil, fmt.Errorf("transport: HTTP %d: %s", resp.StatusCode, bodyPreview)
+	}
+
 	return respBody, nil
 }
 

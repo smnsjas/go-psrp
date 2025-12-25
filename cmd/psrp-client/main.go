@@ -1,29 +1,47 @@
 // Command psrp-client is an example PowerShell Remoting client.
 //
+// Password can be provided via:
+//   - -pass flag (least secure, visible in process list)
+//   - PSRP_PASSWORD environment variable (recommended)
+//   - stdin prompt (if neither flag nor env var is set)
+//
 // Usage:
 //
-//	psrp-client -server <hostname> -user <username> -pass <password> -script <command>
+//	psrp-client -server <hostname> -user <username> -script <command>
 //
-// Example:
+// Examples:
 //
-//	psrp-client -server myserver.domain.com -user admin -pass secret -script "Get-Process"
+//	# Using environment variable (recommended)
+//	export PSRP_PASSWORD='secret'
+//	psrp-client -server myserver -user admin -script "Get-Process"
+//
+//	# Using stdin prompt
+//	psrp-client -server myserver -user admin -script "Get-Process"
+//	Password: ********
+//
+//	# Using flag (not recommended, visible in process list)
+//	psrp-client -server myserver -user admin -pass secret -script "Get-Process"
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
 	"os"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/smnsjas/go-psrp/client"
+	"golang.org/x/term"
 )
 
 func main() {
 	// Parse command line flags
 	server := flag.String("server", "", "WinRM server hostname")
 	username := flag.String("user", "", "Username for authentication")
-	password := flag.String("pass", "", "Password for authentication")
+	password := flag.String("pass", "", "Password (use PSRP_PASSWORD env var instead)")
 	script := flag.String("script", "Get-Process | Select-Object -First 5", "PowerShell script to execute")
 	useTLS := flag.Bool("tls", false, "Use HTTPS (port 5986)")
 	port := flag.Int("port", 0, "WinRM port (default: 5985 for HTTP, 5986 for HTTPS)")
@@ -44,16 +62,18 @@ func main() {
 		flag.Usage()
 		os.Exit(1)
 	}
-	if *password == "" {
-		fmt.Fprintln(os.Stderr, "Error: -pass is required")
-		flag.Usage()
+
+	// Get password from: flag > env var > stdin prompt
+	pass := getPassword(*password)
+	if pass == "" {
+		fmt.Fprintln(os.Stderr, "Error: password is required (use -pass, PSRP_PASSWORD env, or stdin)")
 		os.Exit(1)
 	}
 
 	// Build configuration
 	cfg := client.DefaultConfig()
 	cfg.Username = *username
-	cfg.Password = *password
+	cfg.Password = pass
 	cfg.UseTLS = *useTLS
 	cfg.InsecureSkipVerify = *insecure
 	cfg.Timeout = *timeout
@@ -106,4 +126,38 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Errors:\n%s\n", string(result.Errors))
 		os.Exit(1)
 	}
+}
+
+// getPassword returns password from flag, env var, or prompts for it.
+func getPassword(flagValue string) string {
+	// 1. Check flag
+	if flagValue != "" {
+		return flagValue
+	}
+
+	// 2. Check environment variable
+	if envPass := os.Getenv("PSRP_PASSWORD"); envPass != "" {
+		return envPass
+	}
+
+	// 3. Prompt for password (hide input if terminal)
+	fmt.Fprint(os.Stderr, "Password: ")
+
+	if term.IsTerminal(syscall.Stdin) {
+		// Terminal: read password without echo
+		passBytes, err := term.ReadPassword(syscall.Stdin)
+		fmt.Fprintln(os.Stderr) // newline after password
+		if err != nil {
+			return ""
+		}
+		return string(passBytes)
+	}
+
+	// Not a terminal (piped input): read line
+	reader := bufio.NewReader(os.Stdin)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(line)
 }

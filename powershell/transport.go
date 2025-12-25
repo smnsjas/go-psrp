@@ -28,6 +28,7 @@ type WSManTransport struct {
 }
 
 // NewWSManTransport creates a transport that bridges WSMan to io.ReadWriter.
+// The client, shellID, and commandID can be set later via Configure if needed.
 func NewWSManTransport(client *wsman.Client, shellID, commandID string) *WSManTransport {
 	return &WSManTransport{
 		client:    client,
@@ -51,6 +52,10 @@ func (t *WSManTransport) Write(p []byte) (int, error) {
 	ctx := t.ctx
 	t.mu.Unlock()
 
+	if t.client == nil {
+		return 0, fmt.Errorf("transport not configured")
+	}
+
 	err := t.client.Send(ctx, t.shellID, t.commandID, "stdin", p)
 	if err != nil {
 		return 0, fmt.Errorf("wsman send: %w", err)
@@ -63,6 +68,10 @@ func (t *WSManTransport) Write(p []byte) (int, error) {
 func (t *WSManTransport) Read(p []byte) (int, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
+	if t.client == nil {
+		return 0, fmt.Errorf("transport not configured")
+	}
 
 	// Check context first
 	if err := t.ctx.Err(); err != nil {
@@ -121,4 +130,14 @@ func (t *WSManTransport) Close() error {
 	t.mu.Unlock()
 
 	return t.client.Signal(ctx, t.shellID, t.commandID, SignalTerminate)
+}
+
+// Configure sets the WSMan client and IDs for the transport.
+// This allows the transport to be created before the shell/command are established.
+func (t *WSManTransport) Configure(client *wsman.Client, shellID, commandID string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.client = client
+	t.shellID = shellID
+	t.commandID = commandID
 }

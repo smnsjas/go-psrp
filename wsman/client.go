@@ -34,7 +34,9 @@ type ReceiveResult struct {
 }
 
 // Create creates a new shell (RunspacePool) and returns the shell ID.
-func (c *Client) Create(ctx context.Context, options map[string]string) (string, error) {
+// For PowerShell remoting, creationXml should contain base64-encoded PSRP fragments
+// (SessionCapability + InitRunspacePool messages).
+func (c *Client) Create(ctx context.Context, options map[string]string, creationXml string) (string, error) {
 	env := NewEnvelope().
 		WithAction(ActionCreate).
 		WithTo(c.endpoint).
@@ -50,11 +52,23 @@ func (c *Client) Create(ctx context.Context, options map[string]string) (string,
 		env.WithOption(name, value)
 	}
 
-	// Add shell body
-	env.WithBody([]byte(`<rsp:Shell xmlns:rsp="` + NsShell + `">
+	// Build shell body with optional creationXml for PSRP
+	var shellBody string
+	if creationXml != "" {
+		// PowerShell remoting requires creationXml with PSRP fragments
+		shellBody = `<rsp:Shell xmlns:rsp="` + NsShell + `">
   <rsp:InputStreams>stdin pr</rsp:InputStreams>
   <rsp:OutputStreams>stdout</rsp:OutputStreams>
-</rsp:Shell>`))
+  <creationXml xmlns="http://schemas.microsoft.com/powershell">` + creationXml + `</creationXml>
+</rsp:Shell>`
+	} else {
+		// Basic WinRS shell
+		shellBody = `<rsp:Shell xmlns:rsp="` + NsShell + `">
+  <rsp:InputStreams>stdin pr</rsp:InputStreams>
+  <rsp:OutputStreams>stdout</rsp:OutputStreams>
+</rsp:Shell>`
+	}
+	env.WithBody([]byte(shellBody))
 
 	respBody, err := c.sendEnvelope(ctx, env)
 	if err != nil {
@@ -137,7 +151,7 @@ func (c *Client) Receive(ctx context.Context, shellID, commandID string) (*Recei
 		WithShellNamespace()
 
 	env.WithBody([]byte(`<rsp:Receive xmlns:rsp="` + NsShell + `" SequenceId="0">
-  <rsp:DesiredStream CommandId="` + commandID + `">stdout stderr</rsp:DesiredStream>
+  <rsp:DesiredStream CommandId="` + commandID + `">stdout</rsp:DesiredStream>
 </rsp:Receive>`))
 
 	respBody, err := c.sendEnvelope(ctx, env)
