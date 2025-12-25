@@ -56,6 +56,7 @@ func (t *WSManTransport) Write(p []byte) (int, error) {
 		return 0, fmt.Errorf("transport not configured")
 	}
 
+	// Send PSRP data to stdin stream
 	err := t.client.Send(ctx, t.shellID, t.commandID, "stdin", p)
 	if err != nil {
 		return 0, fmt.Errorf("wsman send: %w", err)
