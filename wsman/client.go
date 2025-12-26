@@ -108,7 +108,9 @@ func (c *Client) Command(ctx context.Context, shellID, commandID, arguments stri
 		WithSessionID(c.sessionID).
 		WithLocale("en-US").
 		WithDataLocale("en-US").
-		WithOption("WINRS_SKIP_CMD_SHELL", "False").
+		WithOption("WINRS_SKIP_CMD_SHELL", "FALSE").
+		WithOption("WINRS_CONSOLEMODE_STDIN", "TRUE").
+		WithMaxEnvelopeSize(153600).
 		WithSelector("ShellId", shellID).
 		WithShellNamespace()
 

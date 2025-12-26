@@ -274,6 +274,7 @@ func (c *Client) Execute(ctx context.Context, script string) (*Result, error) {
 	// Get the CreatePipeline fragment data to embed in WSMan Command Arguments
 	// This is the key difference from before - pypsrp sends CreatePipeline in Command Args
 	// We use the new GetCreatePipelineDataWithID to ensure ObjectID continuity.
+	// We use the new GetCreatePipelineDataWithID to ensure ObjectID continuity.
 	c.messageID++
 	createPipelineData, err := psrpPipeline.GetCreatePipelineDataWithID(c.messageID)
 	if err != nil {
