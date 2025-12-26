@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -92,6 +93,7 @@ type Client struct {
 	poolID        uuid.UUID
 	connected     bool
 	closed        bool
+	messageID     uint64 // Tracks PSRP message ObjectID sequence
 }
 
 // New creates a new PSRP client.
@@ -180,26 +182,21 @@ func (c *Client) Connect(ctx context.Context) error {
 		return fmt.Errorf("open wsman shell: %w", err)
 	}
 
-	// 3. Create WSMan command (Pipeline) for the PSRP transport
-	pipeline, err := c.pool.CreatePipeline(ctx)
-	if err != nil {
-		_ = c.pool.Close(ctx) // Best-effort cleanup
-		return fmt.Errorf("create wsman command: %w", err)
-	}
-
-	// 4. Configure the Transport with the real ShellID and CommandID
-	c.psrpTransport.Configure(c.wsman, c.pool.ShellID(), pipeline.CommandID())
-
-	// 5. Open the PSRP pool (Skipping invalid initial sends)
+	// 3. Open the PSRP pool (Skip handshake since it was handled in creationXml)
 	// We set SkipHandshakeSend because we already sent the handshake in creationXml
 	c.psrpPool.SkipHandshakeSend = true
 	if err := c.psrpPool.Open(ctx); err != nil {
-		_ = pipeline.Close(ctx) // Best-effort cleanup
-		_ = c.pool.Close(ctx)   // Best-effort cleanup
+		_ = c.pool.Close(ctx) // Best-effort cleanup
 		return fmt.Errorf("open psrp pool: %w", err)
 	}
 
 	c.connected = true
+
+	// Initialize messageID counter.
+	// We assume Session Capability Exchange (ID=1) and InitRunspacePool (ID=2) are sent during connection.
+	// So next ID should be 3.
+	c.messageID = 2
+
 	return nil
 }
 
@@ -261,23 +258,62 @@ func (c *Client) Execute(ctx context.Context, script string) (*Result, error) {
 		return nil, errors.New("client is closed")
 	}
 	psrpPool := c.psrpPool
+	pool := c.pool
+	wsman := c.wsman
 	c.mu.Unlock()
 
 	// Create a go-psrpcore pipeline for this execution
-	pipeline, err := psrpPool.CreatePipeline(script)
+	// Mimic pypsrp behavior: wrap command in Invoke-Expression and pipe to Out-String
+	// This ensures output formatting and execution context match the working client
+	wrappedScript := fmt.Sprintf("Invoke-Expression -Command \"%s\" | Out-String", script)
+	psrpPipeline, err := psrpPool.CreatePipeline(wrappedScript)
 	if err != nil {
 		return nil, fmt.Errorf("create pipeline: %w", err)
 	}
 
-	// Invoke the pipeline (sends CREATE_PIPELINE message)
-	if err := pipeline.Invoke(ctx); err != nil {
+	// Get the CreatePipeline fragment data to embed in WSMan Command Arguments
+	// This is the key difference from before - pypsrp sends CreatePipeline in Command Args
+	// We use the new GetCreatePipelineDataWithID to ensure ObjectID continuity.
+	c.messageID++
+	createPipelineData, err := psrpPipeline.GetCreatePipelineDataWithID(c.messageID)
+	if err != nil {
+		return nil, fmt.Errorf("get create pipeline data: %w", err)
+	}
+
+	// Create WSMan Command with:
+	// - CommandID = go-psrpcore Pipeline ID (so response routing works)
+	// - Arguments = CreatePipeline fragment (base64 encoded)
+	pipelineID := strings.ToUpper(psrpPipeline.ID().String())
+	payloadB64 := base64.StdEncoding.EncodeToString(createPipelineData)
+	fmt.Printf("\n--- DEBUG: CreatePipeline Payload (Base64) ---\n%s\n------------------------------------------------\n", payloadB64)
+
+	wsmanPipeline, err := pool.CreatePipelineWithArgs(ctx, pipelineID, payloadB64)
+	if err != nil {
+		return nil, fmt.Errorf("create wsman command: %w", err)
+	}
+	defer wsmanPipeline.Close(ctx) // Clean up WSMan command when done
+
+	// Configure the transport for this specific command
+	c.psrpTransport.Configure(wsman, pool.ShellID(), wsmanPipeline.CommandID())
+
+	// Tell the pipeline to skip sending CreatePipeline - it was already sent in Command Args
+	psrpPipeline.SkipInvokeSend()
+
+	// Invoke the pipeline (this now just transitions state, no network send)
+	if err := psrpPipeline.Invoke(ctx); err != nil {
 		return nil, fmt.Errorf("invoke pipeline: %w", err)
 	}
 
-	// Close input (we're not sending piped input)
-	if err := pipeline.CloseInput(ctx); err != nil {
-		return nil, fmt.Errorf("close input: %w", err)
-	}
+	// Start the dispatch loop FIRST - WinRM Receive is a long-poll that must be
+	// waiting on the server when we send EOF. The server will respond to the
+	// waiting Receive request with the pipeline output after processing EOF.
+	psrpPool.StartDispatchLoop()
+
+	// Note: We do NOT call CloseInput() here because go-psrpcore sets
+	// <Obj N="NoInput">true</Obj> in the CreatePipeline message.
+	// This tells the server to close the input stream immediately after creation.
+	// Sending an extra EOF message would be redundant and might confuse the server
+	// or cause race conditions. This matches pypsrp behavior.
 
 	// Collect output
 	var output []byte
@@ -285,18 +321,18 @@ func (c *Client) Execute(ctx context.Context, script string) (*Result, error) {
 	var hadErrors bool
 
 	// Read from output channel
-	for msg := range pipeline.Output() {
+	for msg := range psrpPipeline.Output() {
 		output = append(output, msg.Data...)
 	}
 
 	// Read from error channel
-	for msg := range pipeline.Error() {
+	for msg := range psrpPipeline.Error() {
 		errors = append(errors, msg.Data...)
 		hadErrors = true
 	}
 
 	// Wait for completion
-	if err := pipeline.Wait(); err != nil {
+	if err := psrpPipeline.Wait(); err != nil {
 		hadErrors = true
 		if len(errors) == 0 {
 			errors = []byte(err.Error())

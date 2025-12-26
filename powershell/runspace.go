@@ -12,7 +12,7 @@ import (
 type PoolClient interface {
 	Create(ctx context.Context, options map[string]string, creationXml string) (string, error)
 	Delete(ctx context.Context, shellID string) error
-	Command(ctx context.Context, shellID, arguments string) (string, error)
+	Command(ctx context.Context, shellID, commandID, arguments string) (string, error)
 	Send(ctx context.Context, shellID, commandID, stream string, data []byte) error
 	Receive(ctx context.Context, shellID, commandID string) (*wsman.ReceiveResult, error)
 	Signal(ctx context.Context, shellID, commandID, code string) error
@@ -100,6 +100,13 @@ func (p *RunspacePool) Close(ctx context.Context) error {
 
 // CreatePipeline creates a new PowerShell pipeline in this pool.
 func (p *RunspacePool) CreatePipeline(ctx context.Context) (*Pipeline, error) {
+	return p.CreatePipelineWithArgs(ctx, "", "")
+}
+
+// CreatePipelineWithArgs creates a new PowerShell pipeline with the given CommandID and Arguments.
+// For PSRP over WSMan, the commandID should match the go-psrpcore Pipeline ID, and
+// the arguments should contain the base64-encoded CreatePipeline fragment.
+func (p *RunspacePool) CreatePipelineWithArgs(ctx context.Context, commandID, arguments string) (*Pipeline, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
@@ -110,7 +117,7 @@ func (p *RunspacePool) CreatePipeline(ctx context.Context) (*Pipeline, error) {
 		return nil, ErrPoolClosed
 	}
 
-	commandID, err := p.client.Command(ctx, p.shellID, "")
+	returnedID, err := p.client.Command(ctx, p.shellID, commandID, arguments)
 	if err != nil {
 		return nil, err
 	}
@@ -118,6 +125,6 @@ func (p *RunspacePool) CreatePipeline(ctx context.Context) (*Pipeline, error) {
 	return &Pipeline{
 		client:    p.client,
 		shellID:   p.shellID,
-		commandID: commandID,
+		commandID: returnedID,
 	}, nil
 }
