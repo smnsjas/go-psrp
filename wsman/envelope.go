@@ -29,15 +29,28 @@ type Header struct {
 	ReplyTo   *ReplyTo `xml:"a:ReplyTo,omitempty"`
 
 	// WS-Management headers
-	ResourceURI      string `xml:"w:ResourceURI,omitempty"`
-	MaxEnvelopeSize  int    `xml:"w:MaxEnvelopeSize,omitempty"`
-	OperationTimeout string `xml:"w:OperationTimeout,omitempty"`
-	Locale           string `xml:"p:Locale,omitempty"`
-	DataLocale       string `xml:"p:DataLocale,omitempty"`
+	ResourceURI      string      `xml:"w:ResourceURI,omitempty"`
+	MaxEnvelopeSize  int         `xml:"w:MaxEnvelopeSize,omitempty"`
+	OperationTimeout string      `xml:"w:OperationTimeout,omitempty"`
+	Locale           *Locale     `xml:"w:Locale,omitempty"`
+	DataLocale       *DataLocale `xml:"p:DataLocale,omitempty"`
+	SessionID        string      `xml:"p:SessionId,omitempty"`
 
 	// Shell-specific headers
 	SelectorSet *SelectorSet `xml:"w:SelectorSet,omitempty"`
 	OptionSet   *OptionSet   `xml:"w:OptionSet,omitempty"`
+}
+
+// Locale representing xml:lang attribute
+type Locale struct {
+	MustUnderstand bool   `xml:"s:mustUnderstand,attr,omitempty"`
+	Lang           string `xml:"xml:lang,attr,omitempty"`
+}
+
+// DataLocale representing xml:lang attribute
+type DataLocale struct {
+	MustUnderstand bool   `xml:"s:mustUnderstand,attr,omitempty"`
+	Lang           string `xml:"xml:lang,attr,omitempty"`
 }
 
 // ReplyTo represents the WS-Addressing ReplyTo element.
@@ -156,6 +169,30 @@ func (e *Envelope) WithOption(name, value string) *Envelope {
 // WithBody sets the SOAP body content.
 func (e *Envelope) WithBody(content []byte) *Envelope {
 	e.Body.Content = content
+	return e
+}
+
+// WithSessionID sets the WS-Management SessionId header.
+func (e *Envelope) WithSessionID(sessionID string) *Envelope {
+	e.Header.SessionID = sessionID
+	return e
+}
+
+// WithLocale sets the WS-Management Locale header.
+func (e *Envelope) WithLocale(lang string) *Envelope {
+	e.Header.Locale = &Locale{
+		Lang:           lang,
+		MustUnderstand: false,
+	}
+	return e
+}
+
+// WithDataLocale sets the WS-Management DataLocale header.
+func (e *Envelope) WithDataLocale(lang string) *Envelope {
+	e.Header.DataLocale = &DataLocale{
+		Lang:           lang,
+		MustUnderstand: false,
+	}
 	return e
 }
 

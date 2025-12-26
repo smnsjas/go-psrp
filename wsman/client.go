@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/xml"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/smnsjas/go-psrp/wsman/transport"
@@ -14,6 +15,7 @@ import (
 type Client struct {
 	endpoint  string
 	transport *transport.HTTPTransport
+	sessionID string
 }
 
 // NewClient creates a new WSMan client.
@@ -21,7 +23,13 @@ func NewClient(endpoint string, tr *transport.HTTPTransport) *Client {
 	return &Client{
 		endpoint:  endpoint,
 		transport: tr,
+		sessionID: "uuid:" + strings.ToUpper(uuid.New().String()),
 	}
+}
+
+// SetSessionID sets the WS-Management SessionId for the client.
+func (c *Client) SetSessionID(sessionID string) {
+	c.sessionID = sessionID
 }
 
 // ReceiveResult contains the result of a Receive operation.
@@ -41,10 +49,13 @@ func (c *Client) Create(ctx context.Context, options map[string]string, creation
 		WithAction(ActionCreate).
 		WithTo(c.endpoint).
 		WithResourceURI(ResourceURIPowerShell).
-		WithMessageID("uuid:" + uuid.New().String()).
-		WithReplyTo(AddressAnonymous).
 		WithMaxEnvelopeSize(153600).
 		WithOperationTimeout("PT60S").
+		WithMessageID("uuid:" + strings.ToUpper(uuid.New().String())).
+		WithReplyTo(AddressAnonymous).
+		WithSessionID(c.sessionID).
+		WithLocale("en-US").
+		WithDataLocale("en-US").
 		WithShellNamespace()
 
 	// Add shell options
@@ -85,21 +96,43 @@ func (c *Client) Create(ctx context.Context, options map[string]string, creation
 }
 
 // Command creates a new command (Pipeline) in the shell and returns the command ID.
-func (c *Client) Command(ctx context.Context, shellID, arguments string) (string, error) {
+// If commandID is provided (non-empty), it will be used as the CommandId in the request.
+// Otherwise, the server will generate a CommandId.
+func (c *Client) Command(ctx context.Context, shellID, commandID, arguments string) (string, error) {
 	env := NewEnvelope().
 		WithAction(ActionCommand).
 		WithTo(c.endpoint).
 		WithResourceURI(ResourceURIPowerShell).
-		WithMessageID("uuid:"+uuid.New().String()).
+		WithMessageID("uuid:"+strings.ToUpper(uuid.New().String())).
 		WithReplyTo(AddressAnonymous).
+		WithSessionID(c.sessionID).
+		WithLocale("en-US").
+		WithDataLocale("en-US").
+		WithOption("WINRS_SKIP_CMD_SHELL", "False").
 		WithSelector("ShellId", shellID).
 		WithShellNamespace()
 
-	// Add command body
-	env.WithBody([]byte(`<rsp:CommandLine xmlns:rsp="` + NsShell + `">
+	// Build CommandLine with optional CommandId attribute
+	var commandLine []byte
+	if commandID != "" {
+		commandLine = []byte(`<rsp:CommandLine CommandId="` + commandID + `" xmlns:rsp="` + NsShell + `">
   <rsp:Command></rsp:Command>
-  <rsp:Arguments>` + arguments + `</rsp:Arguments>
-</rsp:CommandLine>`))
+`)
+	} else {
+		commandLine = []byte(`<rsp:CommandLine xmlns:rsp="` + NsShell + `">
+  <rsp:Command></rsp:Command>
+`)
+	}
+
+	if arguments != "" {
+		commandLine = append(commandLine, []byte(`  <rsp:Arguments>`+arguments+`</rsp:Arguments>
+`)...)
+	}
+
+	commandLine = append(commandLine, []byte(`</rsp:CommandLine>
+`)...)
+
+	env.WithBody([]byte(commandLine))
 
 	respBody, err := c.sendEnvelope(ctx, env)
 	if err != nil {
@@ -122,8 +155,13 @@ func (c *Client) Send(ctx context.Context, shellID, commandID, stream string, da
 		WithAction(ActionSend).
 		WithTo(c.endpoint).
 		WithResourceURI(ResourceURIPowerShell).
-		WithMessageID("uuid:"+uuid.New().String()).
+		WithMessageID("uuid:"+strings.ToUpper(uuid.New().String())).
 		WithReplyTo(AddressAnonymous).
+		WithMaxEnvelopeSize(153600).
+		WithOperationTimeout("PT60S").
+		WithSessionID(c.sessionID).
+		WithLocale("en-US").
+		WithDataLocale("en-US").
 		WithSelector("ShellId", shellID).
 		WithShellNamespace()
 
@@ -145,16 +183,26 @@ func (c *Client) Receive(ctx context.Context, shellID, commandID string) (*Recei
 		WithAction(ActionReceive).
 		WithTo(c.endpoint).
 		WithResourceURI(ResourceURIPowerShell).
-		WithMessageID("uuid:"+uuid.New().String()).
+		WithMessageID("uuid:"+strings.ToUpper(uuid.New().String())).
 		WithReplyTo(AddressAnonymous).
+		WithMaxEnvelopeSize(153600).
+		WithOperationTimeout("PT20S").
+		WithSessionID(c.sessionID).
+		WithLocale("en-US").
+		WithDataLocale("en-US").
+		WithOption("WSMAN_CMDSHELL_OPTION_KEEPALIVE", "True").
 		WithSelector("ShellId", shellID).
 		WithShellNamespace()
 
-	env.WithBody([]byte(`<rsp:Receive xmlns:rsp="` + NsShell + `" SequenceId="0">
+	// Match pypsrp format: CommandId IS required on DesiredStream
+	body := []byte(`<rsp:Receive xmlns:rsp="` + NsShell + `">
   <rsp:DesiredStream CommandId="` + commandID + `">stdout</rsp:DesiredStream>
-</rsp:Receive>`))
+</rsp:Receive>`)
 
-	respBody, err := c.sendEnvelope(ctx, env)
+	// Debug: print request body
+	fmt.Printf("DEBUG: Receive Request: %s\n", string(body))
+
+	respBody, err := c.sendEnvelope(ctx, env.WithBody(body))
 	if err != nil {
 		return nil, fmt.Errorf("receive: %w", err)
 	}
@@ -182,6 +230,17 @@ func (c *Client) Receive(ctx context.Context, shellID, commandID string) (*Recei
 	}
 
 	// Check command state
+	// Debug: print what we received
+	fmt.Printf("DEBUG: Receive Response: State=%s ExitCode=%v StreamCount=%d\n",
+		resp.Body.ReceiveResponse.CommandState.State,
+		resp.Body.ReceiveResponse.CommandState.ExitCode,
+		len(resp.Body.ReceiveResponse.Streams))
+	if len(resp.Body.ReceiveResponse.Streams) > 0 {
+		fmt.Printf("DEBUG: Stream 0 Name=%s ContentLen=%d\n",
+			resp.Body.ReceiveResponse.Streams[0].Name,
+			len(resp.Body.ReceiveResponse.Streams[0].Content))
+	}
+
 	result.CommandState = resp.Body.ReceiveResponse.CommandState.State
 	if resp.Body.ReceiveResponse.CommandState.ExitCode != nil {
 		result.ExitCode = *resp.Body.ReceiveResponse.CommandState.ExitCode
@@ -197,8 +256,11 @@ func (c *Client) Signal(ctx context.Context, shellID, commandID, code string) er
 		WithAction(ActionSignal).
 		WithTo(c.endpoint).
 		WithResourceURI(ResourceURIPowerShell).
-		WithMessageID("uuid:"+uuid.New().String()).
+		WithMessageID("uuid:"+strings.ToUpper(uuid.New().String())).
 		WithReplyTo(AddressAnonymous).
+		WithSessionID(c.sessionID).
+		WithLocale("en-US").
+		WithDataLocale("en-US").
 		WithSelector("ShellId", shellID).
 		WithShellNamespace()
 
@@ -240,6 +302,12 @@ func (c *Client) sendEnvelope(ctx context.Context, env *Envelope) ([]byte, error
 	}
 
 	return c.transport.Post(ctx, c.endpoint, body)
+}
+
+// CloseIdleConnections closes any idle connections in the underlying transport.
+// This forces a fresh NTLM handshake for subsequent requests.
+func (c *Client) CloseIdleConnections() {
+	c.transport.CloseIdleConnections()
 }
 
 // Response types for XML parsing.

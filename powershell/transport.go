@@ -56,11 +56,15 @@ func (t *WSManTransport) Write(p []byte) (int, error) {
 		return 0, fmt.Errorf("transport not configured")
 	}
 
+	fmt.Printf("DEBUG: transport.Write called, %d bytes\n", len(p))
+
 	// Send PSRP data to stdin stream
 	err := t.client.Send(ctx, t.shellID, t.commandID, "stdin", p)
 	if err != nil {
+		fmt.Printf("DEBUG: transport.Write failed: %v\n", err)
 		return 0, fmt.Errorf("wsman send: %w", err)
 	}
+	fmt.Printf("DEBUG: transport.Write succeeded\n")
 	return len(p), nil
 }
 
@@ -89,11 +93,16 @@ func (t *WSManTransport) Read(p []byte) (int, error) {
 		return 0, io.EOF
 	}
 
+	fmt.Printf("DEBUG: transport.Read calling Receive...\n")
+
 	// Poll for more data
 	result, err := t.client.Receive(t.ctx, t.shellID, t.commandID)
 	if err != nil {
+		fmt.Printf("DEBUG: transport.Read failed: %v\n", err)
 		return 0, fmt.Errorf("wsman receive: %w", err)
 	}
+
+	fmt.Printf("DEBUG: transport.Read got response, Stdout=%d bytes, Done=%v\n", len(result.Stdout), result.Done)
 
 	// Decode and buffer the stdout (it comes as base64 from WSMan)
 	if len(result.Stdout) > 0 {
@@ -141,4 +150,12 @@ func (t *WSManTransport) Configure(client *wsman.Client, shellID, commandID stri
 	t.client = client
 	t.shellID = shellID
 	t.commandID = commandID
+}
+
+// CloseIdleConnections closes any idle connections in the underlying WSMan client.
+// This forces a fresh NTLM handshake for subsequent requests.
+func (t *WSManTransport) CloseIdleConnections() {
+	if t.client != nil {
+		t.client.CloseIdleConnections()
+	}
 }

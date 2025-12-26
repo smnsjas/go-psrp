@@ -39,6 +39,16 @@ func NewHTTPTransport(opts ...HTTPTransportOption) *HTTPTransport {
 					// For TLS 1.2, Go defaults to secure cipher suites
 					MinVersion: tls.VersionTLS12,
 				},
+				// NTLM requires persistent connections for the handshake
+				DisableKeepAlives: false,
+				// Increase connection limits for better NTLM session persistence
+				// We need at least 2 connections: one for Send (Command Input) and one for Receive (Output)
+				// Setting this too high can cause race conditions during NTLM handshake on new connections
+				MaxIdleConns:        10,
+				MaxIdleConnsPerHost: 2,
+				MaxConnsPerHost:     2,
+				// Longer idle timeout for NTLM sessions
+				IdleConnTimeout: 90 * time.Second,
 			},
 		},
 	}
@@ -134,4 +144,10 @@ func (t *HTTPTransport) Post(ctx context.Context, url string, body []byte) ([]by
 // Client returns the underlying HTTP client for advanced configuration.
 func (t *HTTPTransport) Client() *http.Client {
 	return t.client
+}
+
+// CloseIdleConnections closes any idle connections in the transport.
+// This is useful to force a fresh NTLM handshake for subsequent requests.
+func (t *HTTPTransport) CloseIdleConnections() {
+	t.client.CloseIdleConnections()
 }
