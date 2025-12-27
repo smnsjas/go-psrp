@@ -15,6 +15,7 @@ import (
 	"github.com/smnsjas/go-psrp/wsman"
 	"github.com/smnsjas/go-psrp/wsman/auth"
 	"github.com/smnsjas/go-psrp/wsman/transport"
+	"github.com/smnsjas/go-psrpcore/messages"
 	"github.com/smnsjas/go-psrpcore/runspace"
 	"github.com/smnsjas/go-psrpcore/serialization"
 )
@@ -237,9 +238,7 @@ func (c *Client) IsConnected() bool {
 }
 
 // Result represents the result of a PowerShell command execution.
-// Currently supports Output and Error streams from the pipeline.
-// Note: Warning, Verbose, Debug, and Progress streams require
-// go-psrpcore enhancements and are not yet exposed.
+// All PowerShell output streams are supported.
 type Result struct {
 	// Output contains deserialized objects from the pipeline output stream.
 	// Each element is a Go type: string, int32, int64, bool, float64,
@@ -249,6 +248,21 @@ type Result struct {
 	// Errors contains deserialized ErrorRecord objects from the error stream.
 	// Populated when PowerShell writes to the error stream (non-terminating errors).
 	Errors []interface{}
+
+	// Warnings contains deserialized warning messages from Write-Warning.
+	Warnings []interface{}
+
+	// Verbose contains deserialized verbose messages from Write-Verbose.
+	Verbose []interface{}
+
+	// Debug contains deserialized debug messages from Write-Debug.
+	Debug []interface{}
+
+	// Progress contains deserialized progress records from Write-Progress.
+	Progress []interface{}
+
+	// Information contains deserialized information records from Write-Information.
+	Information []interface{}
 
 	// HadErrors is true if any error records were received or the pipeline failed.
 	HadErrors bool
@@ -327,40 +341,53 @@ func (c *Client) Execute(ctx context.Context, script string) (*Result, error) {
 	// Sending an extra EOF message would be redundant and might confuse the server
 	// or cause race conditions. This matches pypsrp behavior.
 
-	// Collect output
-	var output []interface{}
-	var errOutput []interface{}
-	var hadErrors bool
+	// Collect output from all streams concurrently
+	var (
+		output      []interface{}
+		errOutput   []interface{}
+		warnings    []interface{}
+		verbose     []interface{}
+		debug       []interface{}
+		progress    []interface{}
+		information []interface{}
+		hadErrors   bool
+		wg          sync.WaitGroup
+		mu          sync.Mutex // Protects hadErrors
+	)
 
-	// Read from output channel and deserialize CLIXML
-	for msg := range psrpPipeline.Output() {
-		// Deserialize CLIXML to get actual values
-		deser := serialization.NewDeserializer()
-		results, err := deser.Deserialize(msg.Data)
-		deser.Close()
-		if err != nil {
-			// If deserialization fails, include raw data as string
-			output = append(output, string(msg.Data))
-			continue
+	// Helper to deserialize messages from a channel
+	drainChannel := func(ch <-chan *messages.Message, dest *[]interface{}, markError bool) {
+		defer wg.Done()
+		for msg := range ch {
+			if markError {
+				mu.Lock()
+				hadErrors = true
+				mu.Unlock()
+			}
+			deser := serialization.NewDeserializer()
+			results, err := deser.Deserialize(msg.Data)
+			deser.Close()
+			if err != nil {
+				*dest = append(*dest, string(msg.Data))
+				continue
+			}
+			*dest = append(*dest, results...)
 		}
-		// Append all deserialized objects
-		output = append(output, results...)
 	}
 
-	// Read from error channel and deserialize CLIXML
-	for msg := range psrpPipeline.Error() {
-		hadErrors = true
-		deser := serialization.NewDeserializer()
-		results, err := deser.Deserialize(msg.Data)
-		deser.Close()
-		if err != nil {
-			errOutput = append(errOutput, string(msg.Data))
-			continue
-		}
-		errOutput = append(errOutput, results...)
-	}
+	wg.Add(7)
+	go drainChannel(psrpPipeline.Output(), &output, false)
+	go drainChannel(psrpPipeline.Error(), &errOutput, true)
+	go drainChannel(psrpPipeline.Warning(), &warnings, false)
+	go drainChannel(psrpPipeline.Verbose(), &verbose, false)
+	go drainChannel(psrpPipeline.Debug(), &debug, false)
+	go drainChannel(psrpPipeline.Progress(), &progress, false)
+	go drainChannel(psrpPipeline.Information(), &information, false)
 
-	// Wait for completion
+	// Wait for all channels to be drained
+	wg.Wait()
+
+	// Wait for pipeline completion
 	if err := psrpPipeline.Wait(); err != nil {
 		hadErrors = true
 		if len(errOutput) == 0 {
@@ -369,8 +396,13 @@ func (c *Client) Execute(ctx context.Context, script string) (*Result, error) {
 	}
 
 	return &Result{
-		Output:    output,
-		Errors:    errOutput,
-		HadErrors: hadErrors,
+		Output:      output,
+		Errors:      errOutput,
+		Warnings:    warnings,
+		Verbose:     verbose,
+		Debug:       debug,
+		Progress:    progress,
+		Information: information,
+		HadErrors:   hadErrors,
 	}, nil
 }
