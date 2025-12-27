@@ -16,6 +16,7 @@ import (
 	"github.com/smnsjas/go-psrp/wsman/auth"
 	"github.com/smnsjas/go-psrp/wsman/transport"
 	"github.com/smnsjas/go-psrpcore/runspace"
+	"github.com/smnsjas/go-psrpcore/serialization"
 )
 
 // AuthType specifies the authentication mechanism.
@@ -192,18 +193,13 @@ func (c *Client) Connect(ctx context.Context) error {
 	// 4. Drain Shell Output (RunspacePoolState) to ensure pool is ready
 	// This is critical: if we don't consume the initial Opened state,
 	// subsequent pipeline execution might stall or timeout.
-	fmt.Println("DEBUG: Draining shell output...")
 	// We use a short timeout for this initial drain
 	drainCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	// Perform one Receive on the Shell (empty command ID)
-	_, err = c.wsman.Receive(drainCtx, c.pool.ShellID(), "")
-	if err != nil {
-		fmt.Printf("DEBUG: Drain failed (might be expected if no output immediate): %v\n", err)
-	} else {
-		fmt.Println("DEBUG: Drain successful (received shell output)")
-	}
+	// Drain result is discarded - we just need to consume the state message
+	_, _ = c.wsman.Receive(drainCtx, c.pool.ShellID(), "")
 
 	c.connected = true
 
@@ -245,13 +241,14 @@ func (c *Client) IsConnected() bool {
 // Note: Warning, Verbose, Debug, and Progress streams require
 // go-psrpcore enhancements and are not yet exposed.
 type Result struct {
-	// Output contains the CLIXML-serialized output objects from the pipeline.
-	// Use go-psrpcore/serialization.Deserializer to parse into Go types.
-	Output []byte
+	// Output contains deserialized objects from the pipeline output stream.
+	// Each element is a Go type: string, int32, int64, bool, float64,
+	// *serialization.PSObject, []interface{}, map[string]interface{}, etc.
+	Output []interface{}
 
-	// Errors contains CLIXML-serialized ErrorRecord objects.
+	// Errors contains deserialized ErrorRecord objects from the error stream.
 	// Populated when PowerShell writes to the error stream (non-terminating errors).
-	Errors []byte
+	Errors []interface{}
 
 	// HadErrors is true if any error records were received or the pipeline failed.
 	HadErrors bool
@@ -301,8 +298,6 @@ func (c *Client) Execute(ctx context.Context, script string) (*Result, error) {
 	// - Arguments = CreatePipeline fragment (base64 encoded)
 	pipelineID := strings.ToUpper(psrpPipeline.ID().String())
 	payloadB64 := base64.StdEncoding.EncodeToString(createPipelineData)
-	fmt.Printf("\n--- DEBUG: CreatePipeline Payload (Base64) ---\n%s\n"+
-		"------------------------------------------------\n", payloadB64)
 
 	wsmanPipeline, err := pool.CreatePipelineWithArgs(ctx, pipelineID, payloadB64)
 	if err != nil {
@@ -333,32 +328,49 @@ func (c *Client) Execute(ctx context.Context, script string) (*Result, error) {
 	// or cause race conditions. This matches pypsrp behavior.
 
 	// Collect output
-	var output []byte
-	var errors []byte
+	var output []interface{}
+	var errOutput []interface{}
 	var hadErrors bool
 
-	// Read from output channel
+	// Read from output channel and deserialize CLIXML
 	for msg := range psrpPipeline.Output() {
-		output = append(output, msg.Data...)
+		// Deserialize CLIXML to get actual values
+		deser := serialization.NewDeserializer()
+		results, err := deser.Deserialize(msg.Data)
+		deser.Close()
+		if err != nil {
+			// If deserialization fails, include raw data as string
+			output = append(output, string(msg.Data))
+			continue
+		}
+		// Append all deserialized objects
+		output = append(output, results...)
 	}
 
-	// Read from error channel
+	// Read from error channel and deserialize CLIXML
 	for msg := range psrpPipeline.Error() {
-		errors = append(errors, msg.Data...)
 		hadErrors = true
+		deser := serialization.NewDeserializer()
+		results, err := deser.Deserialize(msg.Data)
+		deser.Close()
+		if err != nil {
+			errOutput = append(errOutput, string(msg.Data))
+			continue
+		}
+		errOutput = append(errOutput, results...)
 	}
 
 	// Wait for completion
 	if err := psrpPipeline.Wait(); err != nil {
 		hadErrors = true
-		if len(errors) == 0 {
-			errors = []byte(err.Error())
+		if len(errOutput) == 0 {
+			errOutput = append(errOutput, err.Error())
 		}
 	}
 
 	return &Result{
 		Output:    output,
-		Errors:    errors,
+		Errors:    errOutput,
 		HadErrors: hadErrors,
 	}, nil
 }
