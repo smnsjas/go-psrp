@@ -173,12 +173,12 @@ func (c *Client) Connect(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("get handshake fragments: %w", err)
 	}
-	creationXml := base64.StdEncoding.EncodeToString(frags)
+	creationXML := base64.StdEncoding.EncodeToString(frags)
 
 	// 2. Create WSMan shell with creationXml
 	// This performs the PSRP handshake (SessionCapability + InitRunspacePool)
 	c.pool = powershell.NewRunspacePool(c.wsman)
-	if err := c.pool.Open(ctx, creationXml); err != nil {
+	if err := c.pool.Open(ctx, creationXML); err != nil {
 		return fmt.Errorf("open wsman shell: %w", err)
 	}
 
@@ -301,7 +301,8 @@ func (c *Client) Execute(ctx context.Context, script string) (*Result, error) {
 	// - Arguments = CreatePipeline fragment (base64 encoded)
 	pipelineID := strings.ToUpper(psrpPipeline.ID().String())
 	payloadB64 := base64.StdEncoding.EncodeToString(createPipelineData)
-	fmt.Printf("\n--- DEBUG: CreatePipeline Payload (Base64) ---\n%s\n------------------------------------------------\n", payloadB64)
+	fmt.Printf("\n--- DEBUG: CreatePipeline Payload (Base64) ---\n%s\n"+
+		"------------------------------------------------\n", payloadB64)
 
 	wsmanPipeline, err := pool.CreatePipelineWithArgs(ctx, pipelineID, payloadB64)
 	if err != nil {

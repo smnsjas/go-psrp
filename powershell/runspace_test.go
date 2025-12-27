@@ -16,7 +16,7 @@ type mockWSManClientForPool struct {
 	deletedShellID string
 }
 
-func (m *mockWSManClientForPool) Create(_ context.Context, _ map[string]string) (string, error) {
+func (m *mockWSManClientForPool) Create(_ context.Context, _ map[string]string, _ string) (string, error) {
 	return m.createShellID, m.createErr
 }
 
@@ -27,7 +27,7 @@ func (m *mockWSManClientForPool) Delete(_ context.Context, shellID string) error
 }
 
 func (m *mockWSManClientForPool) Command(
-	_ context.Context, _, _ string,
+	_ context.Context, _, _, _ string,
 ) (string, error) {
 	return "cmd-id", nil
 }
@@ -52,7 +52,7 @@ func TestRunspacePool_Open(t *testing.T) {
 	pool := NewRunspacePool(mock)
 
 	ctx := context.Background()
-	err := pool.Open(ctx)
+	err := pool.Open(ctx, "")
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestRunspacePool_Close(t *testing.T) {
 	pool := NewRunspacePool(mock)
 
 	ctx := context.Background()
-	_ = pool.Open(ctx)
+	_ = pool.Open(ctx, "")
 
 	err := pool.Close(ctx)
 	if err != nil {
@@ -93,7 +93,7 @@ func TestRunspacePool_CreatePipeline(t *testing.T) {
 	pool := NewRunspacePool(mock)
 
 	ctx := context.Background()
-	_ = pool.Open(ctx)
+	_ = pool.Open(ctx, "")
 
 	pipeline, err := pool.CreatePipeline(ctx)
 	if err != nil {
