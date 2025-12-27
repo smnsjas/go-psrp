@@ -60,39 +60,40 @@ func (c *Client) Create(ctx context.Context, options map[string]string, creation
 
 	// Add shell options
 	for name, value := range options {
-		env.WithOption(name, value)
+		if name == "protocolversion" {
+			env.WithOptionMustComply(name, value)
+		} else {
+			env.WithOption(name, value)
+		}
 	}
 
 	// Build shell body with optional creationXml for PSRP
+	// Generate client-side ShellId like pypsrp does
+	shellID := strings.ToUpper(uuid.New().String())
 	var shellBody string
 	if creationXml != "" {
 		// PowerShell remoting requires creationXml with PSRP fragments
-		shellBody = `<rsp:Shell xmlns:rsp="` + NsShell + `">
+		shellBody = `<rsp:Shell ShellId="` + shellID + `" xmlns:rsp="` + NsShell + `">
   <rsp:InputStreams>stdin pr</rsp:InputStreams>
   <rsp:OutputStreams>stdout</rsp:OutputStreams>
   <creationXml xmlns="http://schemas.microsoft.com/powershell">` + creationXml + `</creationXml>
 </rsp:Shell>`
 	} else {
 		// Basic WinRS shell
-		shellBody = `<rsp:Shell xmlns:rsp="` + NsShell + `">
+		shellBody = `<rsp:Shell ShellId="` + shellID + `" xmlns:rsp="` + NsShell + `">
   <rsp:InputStreams>stdin pr</rsp:InputStreams>
   <rsp:OutputStreams>stdout</rsp:OutputStreams>
 </rsp:Shell>`
 	}
 	env.WithBody([]byte(shellBody))
 
-	respBody, err := c.sendEnvelope(ctx, env)
+	_, err := c.sendEnvelope(ctx, env)
 	if err != nil {
 		return "", fmt.Errorf("create shell: %w", err)
 	}
 
-	// Parse response to extract ShellId
-	var resp createResponse
-	if err := xml.Unmarshal(respBody, &resp); err != nil {
-		return "", fmt.Errorf("parse create response: %w", err)
-	}
-
-	return resp.Body.Shell.ShellID, nil
+	// We already have the ShellId from our request
+	return shellID, nil
 }
 
 // Command creates a new command (Pipeline) in the shell and returns the command ID.
@@ -196,9 +197,16 @@ func (c *Client) Receive(ctx context.Context, shellID, commandID string) (*Recei
 		WithSelector("ShellId", shellID).
 		WithShellNamespace()
 
-	// Match pypsrp format: CommandId IS required on DesiredStream
+	// Match pypsrp format: CommandId IS required on DesiredStream IF it's a command receive
+	var streamNode string
+	if commandID != "" {
+		streamNode = `<rsp:DesiredStream CommandId="` + commandID + `">stdout</rsp:DesiredStream>`
+	} else {
+		streamNode = `<rsp:DesiredStream>stdout</rsp:DesiredStream>`
+	}
+
 	body := []byte(`<rsp:Receive xmlns:rsp="` + NsShell + `">
-  <rsp:DesiredStream CommandId="` + commandID + `">stdout</rsp:DesiredStream>
+  ` + streamNode + `
 </rsp:Receive>`)
 
 	// Debug: print request body
@@ -302,6 +310,9 @@ func (c *Client) sendEnvelope(ctx context.Context, env *Envelope) ([]byte, error
 	if err != nil {
 		return nil, fmt.Errorf("marshal envelope: %w", err)
 	}
+
+	// Debug: print the outgoing SOAP envelope
+	fmt.Printf("\n=== OUTGOING SOAP ENVELOPE ===\n%s\n=== END SOAP ENVELOPE ===\n\n", string(body))
 
 	return c.transport.Post(ctx, c.endpoint, body)
 }

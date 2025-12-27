@@ -182,19 +182,32 @@ func (c *Client) Connect(ctx context.Context) error {
 		return fmt.Errorf("open wsman shell: %w", err)
 	}
 
-	// 3. Open the PSRP pool (Skip handshake since it was handled in creationXml)
-	// We set SkipHandshakeSend because we already sent the handshake in creationXml
+	// 3. Open the PSRP pool
 	c.psrpPool.SkipHandshakeSend = true
 	if err := c.psrpPool.Open(ctx); err != nil {
-		_ = c.pool.Close(ctx) // Best-effort cleanup
+		_ = c.pool.Close(ctx)
 		return fmt.Errorf("open psrp pool: %w", err)
+	}
+
+	// 4. Drain Shell Output (RunspacePoolState) to ensure pool is ready
+	// This is critical: if we don't consume the initial Opened state,
+	// subsequent pipeline execution might stall or timeout.
+	fmt.Println("DEBUG: Draining shell output...")
+	// We use a short timeout for this initial drain
+	drainCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	// Perform one Receive on the Shell (empty command ID)
+	_, err = c.wsman.Receive(drainCtx, c.pool.ShellID(), "")
+	if err != nil {
+		fmt.Printf("DEBUG: Drain failed (might be expected if no output immediate): %v\n", err)
+	} else {
+		fmt.Println("DEBUG: Drain successful (received shell output)")
 	}
 
 	c.connected = true
 
 	// Initialize messageID counter.
-	// We assume Session Capability Exchange (ID=1) and InitRunspacePool (ID=2) are sent during connection.
-	// So next ID should be 3.
 	c.messageID = 2
 
 	return nil
@@ -265,8 +278,10 @@ func (c *Client) Execute(ctx context.Context, script string) (*Result, error) {
 	// Create a go-psrpcore pipeline for this execution
 	// Mimic pypsrp behavior: wrap command in Invoke-Expression and pipe to Out-String
 	// This ensures output formatting and execution context match the working client
-	wrappedScript := fmt.Sprintf("Invoke-Expression -Command \"%s\" | Out-String", script)
-	psrpPipeline, err := psrpPool.CreatePipeline(wrappedScript)
+	// Create a go-psrpcore pipeline for this execution
+	// We use the simple CreatePipeline which defaults to IsScript=true
+	// This generates <Cmd>script</Cmd><IsScript>true</IsScript>
+	psrpPipeline, err := psrpPool.CreatePipeline(script)
 	if err != nil {
 		return nil, fmt.Errorf("create pipeline: %w", err)
 	}
