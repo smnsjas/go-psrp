@@ -23,22 +23,40 @@ type Envelope struct {
 // Header represents the SOAP header containing WS-Addressing and WS-Management headers.
 type Header struct {
 	// WS-Addressing headers
-	Action    string   `xml:"a:Action,omitempty"`
-	To        string   `xml:"a:To,omitempty"`
-	MessageID string   `xml:"a:MessageID,omitempty"`
-	ReplyTo   *ReplyTo `xml:"a:ReplyTo,omitempty"`
+	Action    *ActionHeader `xml:"a:Action,omitempty"`
+	To        string        `xml:"a:To,omitempty"`
+	MessageID string        `xml:"a:MessageID,omitempty"`
+	ReplyTo   *ReplyTo      `xml:"a:ReplyTo,omitempty"`
 
 	// WS-Management headers
-	ResourceURI      string      `xml:"w:ResourceURI,omitempty"`
-	MaxEnvelopeSize  int         `xml:"w:MaxEnvelopeSize,omitempty"`
-	OperationTimeout string      `xml:"w:OperationTimeout,omitempty"`
-	Locale           *Locale     `xml:"w:Locale,omitempty"`
-	DataLocale       *DataLocale `xml:"p:DataLocale,omitempty"`
-	SessionID        string      `xml:"p:SessionId,omitempty"`
+	ResourceURI      *ResourceURIHeader     `xml:"w:ResourceURI,omitempty"`
+	MaxEnvelopeSize  *MaxEnvelopeSizeHeader `xml:"w:MaxEnvelopeSize,omitempty"`
+	OperationTimeout string                 `xml:"w:OperationTimeout,omitempty"`
+	Locale           *Locale                `xml:"w:Locale,omitempty"`
+	DataLocale       *DataLocale            `xml:"p:DataLocale,omitempty"`
+	SessionID        string                 `xml:"p:SessionId,omitempty"`
 
 	// Shell-specific headers
 	SelectorSet *SelectorSet `xml:"w:SelectorSet,omitempty"`
 	OptionSet   *OptionSet   `xml:"w:OptionSet,omitempty"`
+}
+
+// ActionHeader represents Action element with mustUnderstand attribute.
+type ActionHeader struct {
+	MustUnderstand string `xml:"s:mustUnderstand,attr,omitempty"`
+	Value          string `xml:",chardata"`
+}
+
+// ResourceURIHeader represents ResourceURI element with mustUnderstand attribute.
+type ResourceURIHeader struct {
+	MustUnderstand string `xml:"s:mustUnderstand,attr,omitempty"`
+	Value          string `xml:",chardata"`
+}
+
+// MaxEnvelopeSizeHeader represents MaxEnvelopeSize element with mustUnderstand attribute.
+type MaxEnvelopeSizeHeader struct {
+	MustUnderstand string `xml:"s:mustUnderstand,attr,omitempty"`
+	Value          int    `xml:",chardata"`
 }
 
 // Locale representing xml:lang attribute
@@ -55,7 +73,13 @@ type DataLocale struct {
 
 // ReplyTo represents the WS-Addressing ReplyTo element.
 type ReplyTo struct {
-	Address string `xml:"a:Address"`
+	Address *AddressHeader `xml:"a:Address"`
+}
+
+// AddressHeader represents Address element with mustUnderstand attribute.
+type AddressHeader struct {
+	MustUnderstand string `xml:"s:mustUnderstand,attr,omitempty"`
+	Value          string `xml:",chardata"`
 }
 
 // SelectorSet contains selectors for targeting specific resources.
@@ -71,13 +95,15 @@ type Selector struct {
 
 // OptionSet contains options for the operation.
 type OptionSet struct {
-	Options []Option `xml:"w:Option"`
+	MustUnderstand string   `xml:"s:mustUnderstand,attr,omitempty"`
+	Options        []Option `xml:"w:Option"`
 }
 
 // Option represents a single option.
 type Option struct {
-	Name  string `xml:"Name,attr"`
-	Value string `xml:",chardata"`
+	MustComply string `xml:"MustComply,attr,omitempty"`
+	Name       string `xml:"Name,attr"`
+	Value      string `xml:",chardata"`
 }
 
 // Body represents the SOAP body.
@@ -99,7 +125,10 @@ func NewEnvelope() *Envelope {
 
 // WithAction sets the WS-Addressing Action header.
 func (e *Envelope) WithAction(action string) *Envelope {
-	e.Header.Action = action
+	e.Header.Action = &ActionHeader{
+		MustUnderstand: "true",
+		Value:          action,
+	}
 	return e
 }
 
@@ -117,19 +146,30 @@ func (e *Envelope) WithMessageID(messageID string) *Envelope {
 
 // WithReplyTo sets the WS-Addressing ReplyTo header.
 func (e *Envelope) WithReplyTo(address string) *Envelope {
-	e.Header.ReplyTo = &ReplyTo{Address: address}
+	e.Header.ReplyTo = &ReplyTo{
+		Address: &AddressHeader{
+			MustUnderstand: "true",
+			Value:          address,
+		},
+	}
 	return e
 }
 
 // WithResourceURI sets the WS-Management ResourceURI header.
 func (e *Envelope) WithResourceURI(uri string) *Envelope {
-	e.Header.ResourceURI = uri
+	e.Header.ResourceURI = &ResourceURIHeader{
+		MustUnderstand: "true",
+		Value:          uri,
+	}
 	return e
 }
 
 // WithMaxEnvelopeSize sets the WS-Management MaxEnvelopeSize header.
 func (e *Envelope) WithMaxEnvelopeSize(size int) *Envelope {
-	e.Header.MaxEnvelopeSize = size
+	e.Header.MaxEnvelopeSize = &MaxEnvelopeSizeHeader{
+		MustUnderstand: "true",
+		Value:          size,
+	}
 	return e
 }
 
@@ -159,10 +199,24 @@ func (e *Envelope) WithSelector(name, value string) *Envelope {
 // WithOption adds an option to the OptionSet.
 func (e *Envelope) WithOption(name, value string) *Envelope {
 	if e.Header.OptionSet == nil {
-		e.Header.OptionSet = &OptionSet{}
+		e.Header.OptionSet = &OptionSet{
+			MustUnderstand: "true",
+		}
 	}
 	e.Header.OptionSet.Options = append(e.Header.OptionSet.Options,
 		Option{Name: name, Value: value})
+	return e
+}
+
+// WithOptionMustComply adds an option with MustComply="true" to the OptionSet.
+func (e *Envelope) WithOptionMustComply(name, value string) *Envelope {
+	if e.Header.OptionSet == nil {
+		e.Header.OptionSet = &OptionSet{
+			MustUnderstand: "true",
+		}
+	}
+	e.Header.OptionSet.Options = append(e.Header.OptionSet.Options,
+		Option{MustComply: "true", Name: name, Value: value})
 	return e
 }
 
