@@ -209,9 +209,6 @@ func (c *Client) Receive(ctx context.Context, shellID, commandID string) (*Recei
   ` + streamNode + `
 </rsp:Receive>`)
 
-	// Debug: print request body
-	fmt.Printf("DEBUG: Receive Request: %s\n", string(body))
-
 	respBody, err := c.sendEnvelope(ctx, env.WithBody(body))
 	if err != nil {
 		return nil, fmt.Errorf("receive: %w", err)
@@ -240,17 +237,6 @@ func (c *Client) Receive(ctx context.Context, shellID, commandID string) (*Recei
 	}
 
 	// Check command state
-	// Debug: print what we received
-	fmt.Printf("DEBUG: Receive Response: State=%s ExitCode=%v StreamCount=%d\n",
-		resp.Body.ReceiveResponse.CommandState.State,
-		resp.Body.ReceiveResponse.CommandState.ExitCode,
-		len(resp.Body.ReceiveResponse.Streams))
-	if len(resp.Body.ReceiveResponse.Streams) > 0 {
-		fmt.Printf("DEBUG: Stream 0 Name=%s ContentLen=%d\n",
-			resp.Body.ReceiveResponse.Streams[0].Name,
-			len(resp.Body.ReceiveResponse.Streams[0].Content))
-	}
-
 	result.CommandState = resp.Body.ReceiveResponse.CommandState.State
 	if resp.Body.ReceiveResponse.CommandState.ExitCode != nil {
 		result.ExitCode = *resp.Body.ReceiveResponse.CommandState.ExitCode
@@ -310,9 +296,6 @@ func (c *Client) sendEnvelope(ctx context.Context, env *Envelope) ([]byte, error
 	if err != nil {
 		return nil, fmt.Errorf("marshal envelope: %w", err)
 	}
-
-	// Debug: print the outgoing SOAP envelope
-	fmt.Printf("\n=== OUTGOING SOAP ENVELOPE ===\n%s\n=== END SOAP ENVELOPE ===\n\n", string(body))
 
 	return c.transport.Post(ctx, c.endpoint, body)
 }

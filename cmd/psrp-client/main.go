@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/smnsjas/go-psrp/client"
+	"github.com/smnsjas/go-psrpcore/serialization"
 	"golang.org/x/term"
 )
 
@@ -119,11 +120,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Print output
-	fmt.Printf("Output:\n%s\n", string(result.Output))
+	// Print output - format each object for display
+	fmt.Println("Output:")
+	for _, obj := range result.Output {
+		fmt.Println(formatObject(obj))
+	}
 
 	if result.HadErrors {
-		fmt.Fprintf(os.Stderr, "Errors:\n%s\n", string(result.Errors))
+		fmt.Fprintln(os.Stderr, "Errors:")
+		for _, obj := range result.Errors {
+			fmt.Fprintln(os.Stderr, formatObject(obj))
+		}
 		os.Exit(1)
 	}
 }
@@ -160,4 +167,39 @@ func getPassword(flagValue string) string {
 		return ""
 	}
 	return strings.TrimSpace(line)
+}
+
+// formatObject converts a deserialized CLIXML object to a human-readable string.
+func formatObject(v interface{}) string {
+	if v == nil {
+		return "<nil>"
+	}
+	switch val := v.(type) {
+	case string:
+		return val
+	case *serialization.PSObject:
+		// For PSObjects, use ToString if available, otherwise format properties
+		if val.ToString != "" {
+			return val.ToString
+		}
+		// Fallback: format as key=value pairs with recursive formatting
+		var parts []string
+		for k, prop := range val.Properties {
+			parts = append(parts, fmt.Sprintf("%s=%s", k, formatObject(prop)))
+		}
+		return strings.Join(parts, " ")
+	case []interface{}:
+		// Format slices recursively
+		var items []string
+		for _, item := range val {
+			items = append(items, formatObject(item))
+		}
+		return "[" + strings.Join(items, ", ") + "]"
+	case bool:
+		return fmt.Sprintf("%t", val)
+	case int32, int64, float64:
+		return fmt.Sprintf("%v", val)
+	default:
+		return fmt.Sprintf("%v", v)
+	}
 }
