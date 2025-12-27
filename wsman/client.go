@@ -44,7 +44,7 @@ type ReceiveResult struct {
 // Create creates a new shell (RunspacePool) and returns the shell ID.
 // For PowerShell remoting, creationXml should contain base64-encoded PSRP fragments
 // (SessionCapability + InitRunspacePool messages).
-func (c *Client) Create(ctx context.Context, options map[string]string, creationXml string) (string, error) {
+func (c *Client) Create(ctx context.Context, options map[string]string, creationXML string) (string, error) {
 	env := NewEnvelope().
 		WithAction(ActionCreate).
 		WithTo(c.endpoint).
@@ -71,12 +71,12 @@ func (c *Client) Create(ctx context.Context, options map[string]string, creation
 	// Generate client-side ShellId like pypsrp does
 	shellID := strings.ToUpper(uuid.New().String())
 	var shellBody string
-	if creationXml != "" {
-		// PowerShell remoting requires creationXml with PSRP fragments
+	if creationXML != "" {
+		// PowerShell remoting requires creationXML with PSRP fragments
 		shellBody = `<rsp:Shell ShellId="` + shellID + `" xmlns:rsp="` + NsShell + `">
   <rsp:InputStreams>stdin pr</rsp:InputStreams>
   <rsp:OutputStreams>stdout</rsp:OutputStreams>
-  <creationXml xmlns="http://schemas.microsoft.com/powershell">` + creationXml + `</creationXml>
+  <creationXml xmlns="http://schemas.microsoft.com/powershell">` + creationXML + `</creationXml>
 </rsp:Shell>`
 	} else {
 		// Basic WinRS shell
@@ -135,7 +135,7 @@ func (c *Client) Command(ctx context.Context, shellID, commandID, arguments stri
 	commandLine = append(commandLine, []byte(`</rsp:CommandLine>
 `)...)
 
-	env.WithBody([]byte(commandLine))
+	env.WithBody(commandLine)
 
 	respBody, err := c.sendEnvelope(ctx, env)
 	if err != nil {
@@ -324,15 +324,6 @@ func (c *Client) CloseIdleConnections() {
 }
 
 // Response types for XML parsing.
-
-type createResponse struct {
-	XMLName xml.Name `xml:"Envelope"`
-	Body    struct {
-		Shell struct {
-			ShellID string `xml:"ShellId"`
-		} `xml:"Shell"`
-	} `xml:"Body"`
-}
 
 type commandResponse struct {
 	XMLName xml.Name `xml:"Envelope"`

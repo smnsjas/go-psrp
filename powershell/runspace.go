@@ -10,7 +10,7 @@ import (
 
 // PoolClient defines the WSMan operations needed by RunspacePool.
 type PoolClient interface {
-	Create(ctx context.Context, options map[string]string, creationXml string) (string, error)
+	Create(ctx context.Context, options map[string]string, creationXML string) (string, error)
 	Delete(ctx context.Context, shellID string) error
 	Command(ctx context.Context, shellID, commandID, arguments string) (string, error)
 	Send(ctx context.Context, shellID, commandID, stream string, data []byte) error
@@ -51,7 +51,7 @@ func (p *RunspacePool) ShellID() string {
 }
 
 // Open creates the WSMan shell and initializes the runspace pool.
-func (p *RunspacePool) Open(ctx context.Context, creationXml string) error {
+func (p *RunspacePool) Open(ctx context.Context, creationXML string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -67,7 +67,7 @@ func (p *RunspacePool) Open(ctx context.Context, creationXml string) error {
 		"protocolversion": "2.3",
 	}
 
-	shellID, err := p.client.Create(ctx, options, creationXml)
+	shellID, err := p.client.Create(ctx, options, creationXML)
 	if err != nil {
 		return err
 	}

@@ -39,14 +39,14 @@ func TestClient_Create(t *testing.T) {
 
 	client := NewClient(server.URL, transport.NewHTTPTransport())
 
-	shellID, err := client.Create(context.Background(), nil)
+	shellID, err := client.Create(context.Background(), nil, "")
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
 
-	// Verify shell ID was parsed
-	if shellID != "11111111-1111-1111-1111-111111111111" {
-		t.Errorf("shellID = %q, want %q", shellID, "11111111-1111-1111-1111-111111111111")
+	// Verify shell ID is a valid UUID (client-generated)
+	if len(shellID) != 36 || shellID[8] != '-' || shellID[13] != '-' {
+		t.Errorf("shellID = %q, want valid UUID format", shellID)
 	}
 
 	// Verify request contained correct action
@@ -86,7 +86,7 @@ func TestClient_Command(t *testing.T) {
 
 	client := NewClient(server.URL, transport.NewHTTPTransport())
 
-	commandID, err := client.Command(context.Background(), "test-shell-id", "")
+	commandID, err := client.Command(context.Background(), "test-shell-id", "", "")
 	if err != nil {
 		t.Fatalf("Command failed: %v", err)
 	}
