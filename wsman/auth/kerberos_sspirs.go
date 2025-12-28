@@ -43,11 +43,11 @@ type secWinntAuthIdentityA struct {
 	Flags          uint32
 }
 
-// secBuffer matches SecBuffer
+// secBuffer matches SecBuffer - using uintptr for FFI compatibility
 type secBuffer struct {
 	cbBuffer   uint32
 	BufferType uint32
-	pvBuffer   unsafe.Pointer
+	pvBuffer   uintptr // Must be uintptr for purego FFI
 }
 
 // secBufferDesc matches SecBufferDesc
@@ -69,38 +69,38 @@ const (
 	iscReqDelegate        = 0x00000001
 )
 
-// FFI function signatures
+// FFI function signatures - purego requires uintptr for pointers
 var (
 	sspiLibLoaded             bool
 	acquireCredentialsHandleA func(
-		pszPrincipal *byte,
-		pszPackage *byte,
+		pszPrincipal uintptr,
+		pszPackage uintptr,
 		fCredentialUse uint32,
-		pvLogonId unsafe.Pointer,
-		pAuthData unsafe.Pointer,
-		pGetKeyFn unsafe.Pointer,
-		pvGetKeyArgument unsafe.Pointer,
-		phCredential *secHandle,
-		ptsExpiry unsafe.Pointer,
+		pvLogonId uintptr,
+		pAuthData uintptr,
+		pGetKeyFn uintptr,
+		pvGetKeyArgument uintptr,
+		phCredential uintptr,
+		ptsExpiry uintptr,
 	) int32
 
 	initializeSecurityContextA func(
-		phCredential *secHandle,
-		phContext *secHandle,
-		pszTargetName *byte,
+		phCredential uintptr,
+		phContext uintptr,
+		pszTargetName uintptr,
 		fContextReq uint32,
 		Reserved1 uint32,
 		TargetDataRep uint32,
-		pInput *secBufferDesc,
+		pInput uintptr,
 		Reserved2 uint32,
-		phNewContext *secHandle,
-		pOutput *secBufferDesc,
-		pfContextAttr *uint32,
-		ptsExpiry unsafe.Pointer,
+		phNewContext uintptr,
+		pOutput uintptr,
+		pfContextAttr uintptr,
+		ptsExpiry uintptr,
 	) int32
 
-	freeCredentialsHandle func(phCredential *secHandle) int32
-	deleteSecurityContext func(phContext *secHandle) int32
+	freeCredentialsHandle func(phCredential uintptr) int32
+	deleteSecurityContext func(phContext uintptr) int32
 )
 
 // findSSPILibrary locates the sspi-rs shared library
@@ -213,15 +213,15 @@ func NewSSPIRsProvider(cfg SSPIRsConfig, targetSPN string) (*SSPIRsProvider, err
 	}
 
 	status := acquireCredentialsHandleA(
-		nil, // pszPrincipal
-		&pkgName[0],
+		0, // pszPrincipal (nil)
+		uintptr(unsafe.Pointer(&pkgName[0])),
 		secpkgCredOutbound,
-		nil, // pvLogonId
-		unsafe.Pointer(authData),
-		nil, // pGetKeyFn
-		nil, // pvGetKeyArgument
-		&provider.credHandle,
-		nil, // ptsExpiry
+		0, // pvLogonId (nil)
+		uintptr(unsafe.Pointer(authData)),
+		0, // pGetKeyFn (nil)
+		0, // pvGetKeyArgument (nil)
+		uintptr(unsafe.Pointer(&provider.credHandle)),
+		0, // ptsExpiry (nil)
 	)
 
 	if status != secEOK {
@@ -240,7 +240,7 @@ func (p *SSPIRsProvider) Step(ctx context.Context, inputToken []byte) ([]byte, b
 	outSecBuffer := secBuffer{
 		cbBuffer:   uint32(len(outputBuf)),
 		BufferType: secbufferToken,
-		pvBuffer:   unsafe.Pointer(&outputBuf[0]),
+		pvBuffer:   uintptr(unsafe.Pointer(&outputBuf[0])),
 	}
 	outSecBufferDesc := secBufferDesc{
 		ulVersion: secbufferVersion,
@@ -254,7 +254,7 @@ func (p *SSPIRsProvider) Step(ctx context.Context, inputToken []byte) ([]byte, b
 		inSecBuffer := secBuffer{
 			cbBuffer:   uint32(len(inputToken)),
 			BufferType: secbufferToken,
-			pvBuffer:   unsafe.Pointer(&inputToken[0]),
+			pvBuffer:   uintptr(unsafe.Pointer(&inputToken[0])),
 		}
 		inSecBufferDesc = &secBufferDesc{
 			ulVersion: secbufferVersion,
@@ -263,28 +263,37 @@ func (p *SSPIRsProvider) Step(ctx context.Context, inputToken []byte) ([]byte, b
 		}
 	}
 
-	var contextAttr uint32
-	var ctxIn *secHandle
+	var ctxInPtr uintptr
 	if p.hasCtx {
-		ctxIn = &p.ctxHandle
+		ctxInPtr = uintptr(unsafe.Pointer(&p.ctxHandle))
 	}
 
+	var inBufDescPtr uintptr
+	if inSecBufferDesc != nil {
+		inBufDescPtr = uintptr(unsafe.Pointer(inSecBufferDesc))
+	}
+
+	var contextAttr uint32
+
 	status := initializeSecurityContextA(
-		&p.credHandle,
-		ctxIn,
-		&targetName[0],
+		uintptr(unsafe.Pointer(&p.credHandle)),
+		ctxInPtr,
+		uintptr(unsafe.Pointer(&targetName[0])),
 		iscReqMutualAuth,
 		0, // Reserved1
 		0, // TargetDataRep (SECURITY_NATIVE_DREP)
-		inSecBufferDesc,
+		inBufDescPtr,
 		0, // Reserved2
-		&p.ctxHandle,
-		&outSecBufferDesc,
-		&contextAttr,
-		nil, // ptsExpiry
+		uintptr(unsafe.Pointer(&p.ctxHandle)),
+		uintptr(unsafe.Pointer(&outSecBufferDesc)),
+		uintptr(unsafe.Pointer(&contextAttr)),
+		0, // ptsExpiry (nil)
 	)
 
 	p.hasCtx = true
+
+	// Debug: Print token size info
+	fmt.Printf("[DEBUG] InitializeSecurityContextA status: 0x%08X, output token size: %d bytes\n", uint32(status), outSecBuffer.cbBuffer)
 
 	switch status {
 	case secEOK:
@@ -314,12 +323,12 @@ func (p *SSPIRsProvider) Close() error {
 	var errs []error
 
 	if p.hasCtx {
-		if status := deleteSecurityContext(&p.ctxHandle); status != secEOK {
+		if status := deleteSecurityContext(uintptr(unsafe.Pointer(&p.ctxHandle))); status != secEOK {
 			errs = append(errs, fmt.Errorf("DeleteSecurityContext: 0x%08X", uint32(status)))
 		}
 	}
 
-	if status := freeCredentialsHandle(&p.credHandle); status != secEOK {
+	if status := freeCredentialsHandle(uintptr(unsafe.Pointer(&p.credHandle))); status != secEOK {
 		errs = append(errs, fmt.Errorf("FreeCredentialsHandle: 0x%08X", uint32(status)))
 	}
 

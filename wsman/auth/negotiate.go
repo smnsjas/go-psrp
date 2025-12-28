@@ -1,8 +1,10 @@
 package auth
 
 import (
+	"bytes"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 )
@@ -38,21 +40,30 @@ type negotiateRoundTripper struct {
 }
 
 func (rt *negotiateRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	// 1. Try the request optimistically (or if we already have a context, maybe we should reuse?)
-	// For simple Kerberos (1-leg), we often need to present the ticket immediately if we know we are doing Kerberos.
-	// But standard SPNEGO starts with an optimistic Request -> 401Negotiate -> Token Exchange.
-	// OR we can start the token generation immediately if we want to be "Optimistic Kerberos".
+	// Buffer the body so we can retry after 401
+	var bodyBytes []byte
+	if req.Body != nil {
+		var err error
+		bodyBytes, err = io.ReadAll(req.Body)
+		if err != nil {
+			return nil, fmt.Errorf("buffer request body: %w", err)
+		}
+		req.Body.Close()
+	}
 
-	// Let's stick to the standard "Wait for 401" pattern or "Optimistic" if configured?
-	// Actually, many Kerberos clients (like curl --negotiate) wait for the 401 challenge first.
-	// BUT, if we know we need Kerberos, we can just start.
-	// Let's implement the standard: Request -> 401 -> Negotiate.
+	// Create a function to get fresh body reader
+	getBody := func() io.ReadCloser {
+		if bodyBytes == nil {
+			return nil
+		}
+		return io.NopCloser(bytes.NewReader(bodyBytes))
+	}
 
-	// Clone request to avoid data races
-	reqClone := req.Clone(req.Context())
+	// First request
+	firstReq := req.Clone(req.Context())
+	firstReq.Body = getBody()
 
-	// Execute primitive request
-	resp, err := rt.base.RoundTrip(reqClone)
+	resp, err := rt.base.RoundTrip(firstReq)
 	if err != nil {
 		return nil, err
 	}
@@ -62,16 +73,12 @@ func (rt *negotiateRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 		authHeader := resp.Header.Get("WWW-Authenticate")
 		if strings.Contains(strings.ToLower(authHeader), "negotiate") {
 			// Found Negotiate challenge.
-			// Extract token if present (for mutual auth or multi-leg, though initial 401 usually has empty "Negotiate")
+			// Extract token if present (for mutual auth)
 			var serverToken []byte
 			parts := strings.SplitN(authHeader, " ", 2)
 			if len(parts) == 2 && strings.TrimSpace(parts[1]) != "" {
-				// We have a token blob
 				token, err := base64.StdEncoding.DecodeString(strings.TrimSpace(parts[1]))
-				if err != nil {
-					// Failed to decode token, but maybe it's just "Negotiate"
-					// Log warning?
-				} else {
+				if err == nil {
 					serverToken = token
 				}
 			}
@@ -82,11 +89,13 @@ func (rt *negotiateRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 				return resp, fmt.Errorf("negotiate step: %w", err)
 			}
 
-			// Retry the request with Authorization header
-			// We must close the previous response body
+			// Close previous response body
 			resp.Body.Close()
 
+			// Retry with fresh body and Authorization header
 			retryReq := req.Clone(req.Context())
+			retryReq.Body = getBody()
+			retryReq.ContentLength = int64(len(bodyBytes))
 			retryReq.Header.Set("Authorization", fmt.Sprintf("Negotiate %s", base64.StdEncoding.EncodeToString(clientToken)))
 
 			retryResp, err := rt.base.RoundTrip(retryReq)
@@ -94,16 +103,10 @@ func (rt *negotiateRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 				return nil, err
 			}
 
-			// If generic GSSAPI loop needed (continueNeeded), we might need to handle 401 again?
-			// Standard Kerberos is usually 1 round trip after 401.
-			// NTLM-over-Negotiate is 3 legs (Type 1 -> Challenge -> Type 3).
-			// Our interface supports this via `continueNeeded`.
-
+			// Handle multi-leg if needed
 			if continueNeeded && retryResp.StatusCode == http.StatusUnauthorized {
-				// Recursive logic or loop needed here?
-				// For now, let's assume 1-leg Kerberos which is the 90% case.
-				// A robust loop implementation would handle the multi-leg NTLM-over-SPNEGO.
-				// Given we already have a dedicated NTLM provider, this Negotiate provider is strictly for Kerberos initially.
+				// Multi-leg SPNEGO (e.g., NTLM over Negotiate)
+				// For now, return as-is; Kerberos is typically 1-leg
 			}
 
 			return retryResp, nil
