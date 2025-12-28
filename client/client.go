@@ -27,7 +27,10 @@ const (
 	// AuthBasic uses HTTP Basic authentication.
 	AuthBasic AuthType = iota
 	// AuthNTLM uses NTLM authentication.
+	// AuthNTLM uses NTLM authentication.
 	AuthNTLM
+	// AuthKerberos uses Kerberos authentication (via gokrb5).
+	AuthKerberos
 )
 
 // Config holds configuration for a PSRP client.
@@ -45,7 +48,7 @@ type Config struct {
 	// Timeout is the operation timeout.
 	Timeout time.Duration
 
-	// AuthType specifies the authentication type (Basic or NTLM).
+	// AuthType specifies the authentication type (Basic, NTLM, or Kerberos).
 	AuthType AuthType
 
 	// Username for authentication.
@@ -56,6 +59,16 @@ type Config struct {
 
 	// Domain for NTLM authentication.
 	Domain string
+
+	// Kerberos specific settings
+	// Realm is the Kerberos realm (optional, auto-detected from config if empty).
+	Realm string
+	// Krb5ConfPath is the path to krb5.conf (optional, defaults to /etc/krb5.conf).
+	Krb5ConfPath string
+	// KeytabPath is the path to the keytab file (optional).
+	KeytabPath string
+	// CCachePath is the path to the credential cache (optional).
+	CCachePath string
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -70,6 +83,11 @@ func DefaultConfig() Config {
 
 // Validate checks that the configuration is valid.
 func (c *Config) Validate() error {
+	if c.AuthType == AuthKerberos {
+		// For Kerberos, we might not strictly need user/pass if using ccache/keytab implicitly?
+		// But our NewGokrb5Provider logic requires *something*.
+		return nil
+	}
 	if c.Username == "" {
 		return errors.New("username is required")
 	}
@@ -128,6 +146,23 @@ func New(hostname string, cfg Config) (*Client, error) {
 	switch cfg.AuthType {
 	case AuthNTLM:
 		authenticator = auth.NewNTLMAuth(creds)
+	case AuthKerberos:
+		// Target SPN is typically HTTP/hostname
+		targetSPN := fmt.Sprintf("HTTP/%s", hostname)
+
+		krbCfg := auth.Gokrb5Config{
+			Realm:        cfg.Realm,
+			Krb5ConfPath: cfg.Krb5ConfPath,
+			KeytabPath:   cfg.KeytabPath,
+			CCachePath:   cfg.CCachePath,
+			Credentials:  &creds,
+		}
+
+		provider, err := auth.NewGokrb5Provider(krbCfg, targetSPN)
+		if err != nil {
+			return nil, fmt.Errorf("create kerberos provider: %w", err)
+		}
+		authenticator = auth.NewNegotiateAuth(provider)
 	default:
 		authenticator = auth.NewBasicAuth(creds)
 	}
