@@ -6,10 +6,12 @@
 // Usage:
 //   export PSRP_SERVER="server.example.com"
 //   export PSRP_USER="username"
-//   export PSRP_PASSWORD="password"
 //   export PSRP_REALM="EXAMPLE.COM"
 //   export KRB5_CONFIG="/path/to/krb5.conf"  # Optional, defaults to /etc/krb5.conf
+//   export SSPI_RS_LIB="/path/to/libsspi.dylib"  # For sspi-rs backend
 //   go run kerberos_test_manual.go
+//
+// Password will be prompted securely (hidden input).
 
 package main
 
@@ -20,26 +22,44 @@ import (
 	"time"
 
 	"github.com/smnsjas/go-psrp/client"
+	"golang.org/x/term"
 )
 
 func main() {
 	server := os.Getenv("PSRP_SERVER")
 	user := os.Getenv("PSRP_USER")
-	password := os.Getenv("PSRP_PASSWORD")
 	realm := os.Getenv("PSRP_REALM")
 	krb5Conf := os.Getenv("KRB5_CONFIG")
 
-	if server == "" || user == "" || password == "" || realm == "" {
+	if server == "" || user == "" || realm == "" {
 		fmt.Println("ERROR: Missing required environment variables.")
-		fmt.Println("Required: PSRP_SERVER, PSRP_USER, PSRP_PASSWORD, PSRP_REALM")
-		fmt.Println("Optional: KRB5_CONFIG (defaults to /etc/krb5.conf)")
+		fmt.Println("Required: PSRP_SERVER, PSRP_USER, PSRP_REALM")
+		fmt.Println("Optional: KRB5_CONFIG, SSPI_RS_LIB")
 		os.Exit(1)
+	}
+
+	// Check for password in env (for CI) or prompt securely
+	password := os.Getenv("PSRP_PASSWORD")
+	if password == "" {
+		fmt.Print("Password: ")
+		passwordBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Println() // newline after password
+		if err != nil {
+			fmt.Printf("ERROR reading password: %v\n", err)
+			os.Exit(1)
+		}
+		password = string(passwordBytes)
 	}
 
 	fmt.Printf("Connecting to: %s\n", server)
 	fmt.Printf("Realm: %s\n", realm)
 	fmt.Printf("User: %s\n", user)
-	fmt.Printf("krb5.conf: %s\n", krb5Conf)
+	if krb5Conf != "" {
+		fmt.Printf("krb5.conf: %s\n", krb5Conf)
+	}
+	if lib := os.Getenv("SSPI_RS_LIB"); lib != "" {
+		fmt.Printf("sspi-rs lib: %s\n", lib)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()

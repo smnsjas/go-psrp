@@ -48,6 +48,9 @@ func main() {
 	insecure := flag.Bool("insecure", false, "Skip TLS certificate verification")
 	timeout := flag.Duration("timeout", 60*time.Second, "Operation timeout")
 	useNTLM := flag.Bool("ntlm", false, "Use NTLM authentication")
+	useKerberos := flag.Bool("kerberos", false, "Use Kerberos authentication")
+	realm := flag.String("realm", "", "Kerberos realm (e.g., EXAMPLE.COM)")
+	krb5Conf := flag.String("krb5conf", "", "Path to krb5.conf file")
 
 	flag.Parse()
 
@@ -78,7 +81,17 @@ func main() {
 	cfg.InsecureSkipVerify = *insecure
 	cfg.Timeout = *timeout
 
-	if *useNTLM {
+	if *useKerberos {
+		cfg.AuthType = client.AuthKerberos
+		cfg.Realm = *realm
+		cfg.Krb5ConfPath = *krb5Conf
+		if cfg.Realm == "" {
+			cfg.Realm = os.Getenv("PSRP_REALM")
+		}
+		if cfg.Krb5ConfPath == "" {
+			cfg.Krb5ConfPath = os.Getenv("KRB5_CONFIG")
+		}
+	} else if *useNTLM {
 		cfg.AuthType = client.AuthNTLM
 	}
 

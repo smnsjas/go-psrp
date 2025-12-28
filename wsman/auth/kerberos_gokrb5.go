@@ -54,26 +54,31 @@ func NewGokrb5Provider(cfg Gokrb5Config, targetSPN string) (*Gokrb5Provider, err
 
 	var cl *client.Client
 
+	// Client options - disable FAST for compatibility with older KDCs
+	clientOpts := []func(*client.Settings){
+		client.DisablePAFXFAST(true),
+	}
+
 	// 1. Try Keytab
 	if cfg.KeytabPath != "" {
 		kt, err := keytab.Load(cfg.KeytabPath)
 		if err != nil {
 			return nil, fmt.Errorf("load keytab: %w", err)
 		}
-		cl = client.NewWithKeytab(cfg.Credentials.Username, cfg.Realm, kt, conf)
+		cl = client.NewWithKeytab(cfg.Credentials.Username, cfg.Realm, kt, conf, clientOpts...)
 	} else if cfg.CCachePath != "" {
 		// 2. Try CCache
 		cc, err := credentials.LoadCCache(cfg.CCachePath)
 		if err != nil {
 			return nil, fmt.Errorf("load ccache: %w", err)
 		}
-		cl, err = client.NewFromCCache(cc, conf)
+		cl, err = client.NewFromCCache(cc, conf, clientOpts...)
 		if err != nil {
 			return nil, fmt.Errorf("create client from ccache: %w", err)
 		}
 	} else if cfg.Credentials != nil {
 		// 3. Password
-		cl = client.NewWithPassword(cfg.Credentials.Username, cfg.Realm, cfg.Credentials.Password, conf)
+		cl = client.NewWithPassword(cfg.Credentials.Username, cfg.Realm, cfg.Credentials.Password, conf, clientOpts...)
 	} else {
 		return nil, fmt.Errorf("no credentials provided (keytab, ccache, or password required)")
 	}
