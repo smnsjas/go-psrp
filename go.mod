@@ -15,6 +15,7 @@ require (
 )
 
 require (
+	github.com/ebitengine/purego v0.9.1 // indirect
 	github.com/hashicorp/go-uuid v1.0.3 // indirect
 	github.com/jcmturner/aescts/v2 v2.0.0 // indirect
 	github.com/jcmturner/dnsutils/v2 v2.0.0 // indirect
