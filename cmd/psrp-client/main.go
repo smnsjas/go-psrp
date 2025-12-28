@@ -30,7 +30,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/smnsjas/go-psrp/client"
@@ -150,9 +149,10 @@ func getPassword(flagValue string) string {
 	// 3. Prompt for password (hide input if terminal)
 	fmt.Fprint(os.Stderr, "Password: ")
 
-	if term.IsTerminal(syscall.Stdin) {
+	fd := int(os.Stdin.Fd())
+	if term.IsTerminal(fd) {
 		// Terminal: read password without echo
-		passBytes, err := term.ReadPassword(syscall.Stdin)
+		passBytes, err := term.ReadPassword(fd)
 		fmt.Fprintln(os.Stderr) // newline after password
 		if err != nil {
 			return ""
