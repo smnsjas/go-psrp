@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -16,7 +17,44 @@ const (
 
 	// DefaultTimeout is the default HTTP request timeout.
 	DefaultTimeout = 60 * time.Second
+
+	// defaultBufferSize is the initial size for pooled buffers.
+	defaultBufferSize = 32 * 1024 // 32KB
 )
+
+// bufferPool is a pool of reusable bytes.Buffer to reduce allocations.
+var bufferPool = sync.Pool{
+	New: func() interface{} {
+		return bytes.NewBuffer(make([]byte, 0, defaultBufferSize))
+	},
+}
+
+// getBuffer returns a buffer from the pool.
+func getBuffer() *bytes.Buffer {
+	return bufferPool.Get().(*bytes.Buffer)
+}
+
+// putBuffer returns a buffer to the pool after resetting it.
+func putBuffer(buf *bytes.Buffer) {
+	buf.Reset()
+	bufferPool.Put(buf)
+}
+
+// readAllPooled reads from r using a pooled buffer and returns a copy of the data.
+func readAllPooled(r io.Reader) ([]byte, error) {
+	buf := getBuffer()
+	defer putBuffer(buf)
+
+	_, err := buf.ReadFrom(r)
+	if err != nil {
+		return nil, err
+	}
+
+	// Return a copy since buf will be reused
+	result := make([]byte, buf.Len())
+	copy(result, buf.Bytes())
+	return result, nil
+}
 
 // HTTPTransport handles HTTP/HTTPS communication for WSMan.
 type HTTPTransport struct {
@@ -122,7 +160,7 @@ func (t *HTTPTransport) Post(ctx context.Context, url string, body []byte) ([]by
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := readAllPooled(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("transport: failed to read response: %w", err)
 	}
