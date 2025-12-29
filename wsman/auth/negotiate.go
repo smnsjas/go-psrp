@@ -45,7 +45,7 @@ func (rt *negotiateRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 	if req.Body != nil && req.ContentLength > 0 {
 		var err error
 		bodyBytes, err = io.ReadAll(req.Body)
-		req.Body.Close()
+		_ = req.Body.Close() // Error intentionally ignored; body already read
 		if err != nil {
 			return nil, fmt.Errorf("read request body: %w", err)
 		}
@@ -78,13 +78,11 @@ func (rt *negotiateRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 			parts := strings.SplitN(authHeader, " ", 2)
 			if len(parts) == 2 && strings.TrimSpace(parts[1]) != "" {
 				// We have a token blob
-				token, err := base64.StdEncoding.DecodeString(strings.TrimSpace(parts[1]))
-				if err != nil {
-					// Failed to decode token, but maybe it's just "Negotiate"
-					// Log warning?
-				} else {
+				token, decodeErr := base64.StdEncoding.DecodeString(strings.TrimSpace(parts[1]))
+				if decodeErr == nil {
 					serverToken = token
 				}
+				// Decode errors ignored: server may just send "Negotiate" without token
 			}
 
 			// Generate our token
@@ -95,7 +93,7 @@ func (rt *negotiateRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 
 			// Retry the request with Authorization header
 			// We must close the previous response body
-			resp.Body.Close()
+			_ = resp.Body.Close() // Error intentionally ignored
 
 			retryReq := req.Clone(req.Context())
 			retryReq.Header.Set("Authorization", fmt.Sprintf("Negotiate %s", base64.StdEncoding.EncodeToString(clientToken)))
@@ -114,12 +112,9 @@ func (rt *negotiateRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 			// NTLM-over-Negotiate is 3 legs (Type 1 -> Challenge -> Type 3).
 			// Our interface supports this via `continueNeeded`.
 
-			if continueNeeded && retryResp.StatusCode == http.StatusUnauthorized {
-				// Recursive logic or loop needed here?
-				// For now, let's assume 1-leg Kerberos which is the 90% case.
-				// A robust loop implementation would handle the multi-leg NTLM-over-SPNEGO.
-				// Given we already have a dedicated NTLM provider, this Negotiate provider is strictly for Kerberos initially.
-			}
+			// Note: continueNeeded handling for multi-leg SPNEGO is not implemented.
+			// Standard Kerberos is 1-leg, NTLM uses dedicated provider.
+			_ = continueNeeded // Silence unused warning if multi-leg not implemented
 
 			return retryResp, nil
 		}
