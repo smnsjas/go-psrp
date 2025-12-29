@@ -24,12 +24,14 @@ import (
 type AuthType int
 
 const (
+	// AuthNegotiate uses SPNEGO - tries Kerberos first, falls back to NTLM.
+	// This is the recommended default for most Windows environments.
+	AuthNegotiate AuthType = iota
 	// AuthBasic uses HTTP Basic authentication.
-	AuthBasic AuthType = iota
-	// AuthNTLM uses NTLM authentication.
-	// AuthNTLM uses NTLM authentication.
+	AuthBasic
+	// AuthNTLM uses NTLM authentication (direct, not via SPNEGO).
 	AuthNTLM
-	// AuthKerberos uses Kerberos authentication (via gokrb5).
+	// AuthKerberos uses Kerberos authentication only (no NTLM fallback).
 	AuthKerberos
 )
 
@@ -77,20 +79,25 @@ func DefaultConfig() Config {
 		Port:     5985,
 		UseTLS:   false,
 		Timeout:  60 * time.Second,
-		AuthType: AuthBasic,
+		AuthType: AuthNegotiate, // Kerberos preferred, NTLM fallback
 	}
 }
 
 // Validate checks that the configuration is valid.
 func (c *Config) Validate() error {
-	if c.AuthType == AuthKerberos {
-		// For Kerberos, we might not strictly need user/pass if using ccache/keytab implicitly?
-		// But our NewGokrb5Provider logic requires *something*.
-		return nil
-	}
 	if c.Username == "" {
 		return errors.New("username is required")
 	}
+
+	// For Kerberos and Negotiate auth, password is optional if ccache or keytab is provided
+	if c.AuthType == AuthKerberos || c.AuthType == AuthNegotiate {
+		// Password not required if ccache or keytab is available
+		if c.CCachePath != "" || c.KeytabPath != "" {
+			return nil
+		}
+	}
+
+	// Password required for Basic, NTLM, and Kerberos/Negotiate without ccache
 	if c.Password == "" {
 		return errors.New("password is required")
 	}
@@ -144,12 +151,31 @@ func New(hostname string, cfg Config) (*Client, error) {
 
 	var authenticator auth.Authenticator
 	switch cfg.AuthType {
+	case AuthNegotiate:
+		// Try Kerberos first, fall back to NTLM if Kerberos unavailable
+		targetSPN := fmt.Sprintf("HTTP/%s", hostname)
+		krbCfg := auth.KerberosProviderConfig{
+			TargetSPN:    targetSPN,
+			Realm:        cfg.Realm,
+			Krb5ConfPath: cfg.Krb5ConfPath,
+			KeytabPath:   cfg.KeytabPath,
+			CCachePath:   cfg.CCachePath,
+			Credentials:  &creds,
+		}
+
+		provider, err := auth.NewKerberosProvider(krbCfg)
+		if err != nil {
+			// Kerberos unavailable, fall back to NTLM via Negotiate header
+			// go-ntlmssp Negotiator handles Negotiate header with NTLM
+			authenticator = auth.NewNTLMAuth(creds)
+		} else {
+			authenticator = auth.NewNegotiateAuth(provider)
+		}
 	case AuthNTLM:
 		authenticator = auth.NewNTLMAuth(creds)
 	case AuthKerberos:
-		// Target SPN is typically HTTP/hostname
+		// Kerberos only - no fallback
 		targetSPN := fmt.Sprintf("HTTP/%s", hostname)
-
 		krbCfg := auth.KerberosProviderConfig{
 			TargetSPN:    targetSPN,
 			Realm:        cfg.Realm,
@@ -164,8 +190,11 @@ func New(hostname string, cfg Config) (*Client, error) {
 			return nil, fmt.Errorf("create kerberos provider: %w", err)
 		}
 		authenticator = auth.NewNegotiateAuth(provider)
-	default:
+	case AuthBasic:
 		authenticator = auth.NewBasicAuth(creds)
+	default:
+		// Fallback to Negotiate (shouldn't reach here)
+		authenticator = auth.NewNTLMAuth(creds)
 	}
 
 	// Wrap transport with auth

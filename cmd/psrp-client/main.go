@@ -72,13 +72,14 @@ func main() {
 	var pass string
 	hasCache := *ccache != "" || os.Getenv("KRB5CCNAME") != ""
 
-	// Get password unless using Kerberos with cached credentials
-	if !*useKerberos || !hasCache {
+	// Get password unless we have a Kerberos cache (applicable to both -kerberos and default AuthNegotiate)
+	if !hasCache {
 		// Get password from: flag > env var > stdin prompt
 		pass = getPassword(*password)
 	}
 
-	if pass == "" && !*useKerberos && !hasCache {
+	// Password is required unless: using Kerberos with cache, or explicit -kerberos flag with cache
+	if pass == "" && !hasCache {
 		fmt.Fprintln(os.Stderr, "Error: password is required (use -pass, PSRP_PASSWORD env, or stdin)")
 		os.Exit(1)
 	}
@@ -91,24 +92,28 @@ func main() {
 	cfg.InsecureSkipVerify = *insecure
 	cfg.Timeout = *timeout
 
+	// Kerberos settings apply to both AuthNegotiate (default) and explicit -kerberos
+	cfg.Realm = *realm
+	cfg.Krb5ConfPath = *krb5Conf
+	cfg.CCachePath = *ccache
+	// Default to environment variables if flags not set
+	if cfg.CCachePath == "" {
+		cfg.CCachePath = os.Getenv("KRB5CCNAME")
+	}
+	if cfg.Realm == "" {
+		cfg.Realm = os.Getenv("PSRP_REALM")
+	}
+	if cfg.Krb5ConfPath == "" {
+		cfg.Krb5ConfPath = os.Getenv("KRB5_CONFIG")
+	}
+
+	// Override auth type if explicit flag set
 	if *useKerberos {
 		cfg.AuthType = client.AuthKerberos
-		cfg.Realm = *realm
-		cfg.Krb5ConfPath = *krb5Conf
-		cfg.CCachePath = *ccache
-		// Default to KRB5CCNAME env var if flag not set
-		if cfg.CCachePath == "" {
-			cfg.CCachePath = os.Getenv("KRB5CCNAME")
-		}
-		if cfg.Realm == "" {
-			cfg.Realm = os.Getenv("PSRP_REALM")
-		}
-		if cfg.Krb5ConfPath == "" {
-			cfg.Krb5ConfPath = os.Getenv("KRB5_CONFIG")
-		}
 	} else if *useNTLM {
 		cfg.AuthType = client.AuthNTLM
 	}
+	// Default is AuthNegotiate (set by DefaultConfig)
 
 	// Set port
 	if *port != 0 {
