@@ -5,23 +5,23 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/jcmturner/gokrb5/v8/client"
-	"github.com/jcmturner/gokrb5/v8/config"
-	"github.com/jcmturner/gokrb5/v8/credentials"
-	"github.com/jcmturner/gokrb5/v8/keytab"
-	"github.com/jcmturner/gokrb5/v8/spnego"
+	"github.com/go-krb5/krb5/client"
+	"github.com/go-krb5/krb5/config"
+	"github.com/go-krb5/krb5/credentials"
+	"github.com/go-krb5/krb5/keytab"
+	"github.com/go-krb5/krb5/spnego"
 )
 
-// Gokrb5Provider implements SecurityProvider using the pure Go gokrb5 library.
-type Gokrb5Provider struct {
+// PureKerberosProvider implements SecurityProvider using the pure Go gokrb5 library.
+type PureKerberosProvider struct {
 	client       *client.Client
 	spnegoClient *spnego.SPNEGO
 	targetSPN    string
 	isComplete   bool
 }
 
-// Gokrb5Config holds the configuration for the Gokrb5Provider.
-type Gokrb5Config struct {
+// PureKerberosConfig holds the configuration for the PureKerberosProvider.
+type PureKerberosConfig struct {
 	// Realm is the Kerberos realm (e.g. EXAMPLE.COM).
 	Realm string
 
@@ -38,8 +38,8 @@ type Gokrb5Config struct {
 	Credentials *Credentials
 }
 
-// NewGokrb5Provider creates a new pure Go Kerberos provider.
-func NewGokrb5Provider(cfg Gokrb5Config, targetSPN string) (*Gokrb5Provider, error) {
+// NewPureKerberosProvider creates a new pure Go Kerberos provider.
+func NewPureKerberosProvider(cfg PureKerberosConfig, targetSPN string) (*PureKerberosProvider, error) {
 	// Load krb5.conf
 	if cfg.Krb5ConfPath == "" {
 		cfg.Krb5ConfPath = os.Getenv("KRB5_CONFIG")
@@ -54,43 +54,38 @@ func NewGokrb5Provider(cfg Gokrb5Config, targetSPN string) (*Gokrb5Provider, err
 
 	var cl *client.Client
 
-	// Client options - disable FAST for compatibility with older KDCs
-	clientOpts := []func(*client.Settings){
-		client.DisablePAFXFAST(true),
-	}
-
 	// 1. Try Keytab
 	if cfg.KeytabPath != "" {
 		kt, err := keytab.Load(cfg.KeytabPath)
 		if err != nil {
 			return nil, fmt.Errorf("load keytab: %w", err)
 		}
-		cl = client.NewWithKeytab(cfg.Credentials.Username, cfg.Realm, kt, conf, clientOpts...)
+		cl = client.NewWithKeytab(cfg.Credentials.Username, cfg.Realm, kt, conf, client.DisablePAFXFAST(true))
 	} else if cfg.CCachePath != "" {
 		// 2. Try CCache
 		cc, err := credentials.LoadCCache(cfg.CCachePath)
 		if err != nil {
 			return nil, fmt.Errorf("load ccache: %w", err)
 		}
-		cl, err = client.NewFromCCache(cc, conf, clientOpts...)
+		cl, err = client.NewFromCCache(cc, conf, client.DisablePAFXFAST(true))
 		if err != nil {
 			return nil, fmt.Errorf("create client from ccache: %w", err)
 		}
 	} else if cfg.Credentials != nil {
 		// 3. Password
-		cl = client.NewWithPassword(cfg.Credentials.Username, cfg.Realm, cfg.Credentials.Password, conf, clientOpts...)
+		cl = client.NewWithPassword(cfg.Credentials.Username, cfg.Realm, cfg.Credentials.Password, conf, client.DisablePAFXFAST(true))
 	} else {
 		return nil, fmt.Errorf("no credentials provided (keytab, ccache, or password required)")
 	}
 
-	return &Gokrb5Provider{
+	return &PureKerberosProvider{
 		client:    cl,
 		targetSPN: targetSPN,
 	}, nil
 }
 
 // Step performs a GSS-API/SPNEGO step.
-func (p *Gokrb5Provider) Step(ctx context.Context, inputToken []byte) ([]byte, bool, error) {
+func (p *PureKerberosProvider) Step(ctx context.Context, inputToken []byte) ([]byte, bool, error) {
 	// Perform Login if not already logged in
 	// Note: gokrb5 client handles TGT renewal internally for us ideally,
 	// but we trigger an initial login here.
@@ -159,12 +154,12 @@ func (p *Gokrb5Provider) Step(ctx context.Context, inputToken []byte) ([]byte, b
 }
 
 // Complete returns true if the context is established.
-func (p *Gokrb5Provider) Complete() bool {
+func (p *PureKerberosProvider) Complete() bool {
 	return p.isComplete
 }
 
 // Close releases resources.
-func (p *Gokrb5Provider) Close() error {
+func (p *PureKerberosProvider) Close() error {
 	p.client.Destroy()
 	return nil
 }

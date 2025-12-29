@@ -3,20 +3,18 @@
 package auth
 
 // NewKerberosProvider creates the appropriate Kerberos provider for the platform.
-// On non-Windows, this prefers sspi-rs (Rust) if available, falling back to gokrb5.
+// On non-Windows, this uses gokrb5 (pure Go) which works reliably with password auth.
+// CGO sspi-rs has compatibility issues on macOS (can't access ticket cache, tiny tokens).
 func NewKerberosProvider(cfg KerberosProviderConfig) (SecurityProvider, error) {
-	// TODO: sspi-rs FFI has issues with struct write-back, disable for now
-	// Once fixed, re-enable: if SSPIRsAvailable() { ... }
-
-	// Use gokrb5 (pure Go) - known to work
-	gokrb5Cfg := Gokrb5Config{
+	// Use gokrb5 (pure Go) - works reliably with password auth
+	gokrb5Cfg := PureKerberosConfig{
 		Realm:        cfg.Realm,
 		Krb5ConfPath: cfg.Krb5ConfPath,
 		KeytabPath:   cfg.KeytabPath,
 		CCachePath:   cfg.CCachePath,
 		Credentials:  cfg.Credentials,
 	}
-	return NewGokrb5Provider(gokrb5Cfg, cfg.TargetSPN)
+	return NewPureKerberosProvider(gokrb5Cfg, cfg.TargetSPN)
 }
 
 // KerberosProviderConfig holds unified config for any Kerberos provider.
