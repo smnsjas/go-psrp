@@ -30,10 +30,10 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/smnsjas/go-psrp/client"
+	"github.com/smnsjas/go-psrp/wsman/auth"
 	"github.com/smnsjas/go-psrpcore/serialization"
 	"golang.org/x/term"
 )
@@ -62,24 +62,29 @@ func main() {
 		flag.Usage()
 		os.Exit(1)
 	}
-	if *username == "" {
-		fmt.Fprintln(os.Stderr, "Error: -user is required")
+	// Validate flags
+	// Username is required unless the platform supports SSO (e.g. Windows)
+	if *username == "" && !auth.SupportsSSO() {
+		fmt.Fprintln(os.Stderr, "Error: -user is required (SSO not supported on this platform without explicit credentials checks)")
 		flag.Usage()
 		os.Exit(1)
 	}
 
 	// Check for Kerberos cred cache first (SSO)
 	var pass string
-	hasCache := *ccache != "" || os.Getenv("KRB5CCNAME") != ""
+	hasCache := (*ccache != "" || os.Getenv("KRB5CCNAME") != "") && !*useNTLM
 
-	// Get password unless we have a Kerberos cache (applicable to both -kerberos and default AuthNegotiate)
-	if !hasCache {
+	// Get password only if username is provided and no cache (or strict NTLM usage)
+	// For SSO (no username), password is not needed
+	if *username != "" && !hasCache {
 		// Get password from: flag > env var > stdin prompt
 		pass = getPassword(*password)
 	}
 
 	// Password is required unless: using Kerberos with cache, or explicit -kerberos flag with cache
-	if pass == "" && !hasCache {
+	// Password is required if username provided, unless: using Kerberos with cache
+	// If SSO (no username), password is not required
+	if *username != "" && pass == "" && !hasCache {
 		fmt.Fprintln(os.Stderr, "Error: password is required (use -pass, PSRP_PASSWORD env, or stdin)")
 		os.Exit(1)
 	}
@@ -182,9 +187,12 @@ func getPassword(flagValue string) string {
 	// 3. Prompt for password (hide input if terminal)
 	fmt.Fprint(os.Stderr, "Password: ")
 
-	if term.IsTerminal(syscall.Stdin) {
+	// Use os.Stdin.Fd() cast to int for cross-platform compatibility
+	// (syscall.Stdin is type-specific per OS)
+	fd := int(os.Stdin.Fd())
+	if term.IsTerminal(fd) {
 		// Terminal: read password without echo
-		passBytes, err := term.ReadPassword(syscall.Stdin)
+		passBytes, err := term.ReadPassword(fd)
 		fmt.Fprintln(os.Stderr) // newline after password
 		if err != nil {
 			return ""

@@ -50,6 +50,7 @@ func (c *credentialsRoundTripper) RoundTrip(req *http.Request) (*http.Response, 
 	if c.creds.Domain != "" {
 		username = c.creds.Domain + "\\" + c.creds.Username
 	}
+
 	reqCopy.SetBasicAuth(username, c.creds.Password)
 
 	return c.base.RoundTrip(reqCopy)
