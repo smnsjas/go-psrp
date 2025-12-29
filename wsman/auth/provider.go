@@ -5,12 +5,20 @@ import "context"
 // SecurityProvider handles the low-level authentication token exchange.
 // It abstracts the differences between NTLM, Kerberos (Pure Go), SSPI (Windows), and GSSAPI.
 //
-// The flow is typically:
-// 1. Client calls Step(nil) -> returns Initial Token
-// 2. Client sends Token to Server
-// 3. Server responds with Server Token (Challenge)
-// 4. Client calls Step(Server Token) -> returns Response Token
-// 5. Repeat until Complete() returns true.
+// # Thread Safety
+//
+// SecurityProvider implementations are NOT safe for concurrent use.
+// Each goroutine should use its own provider instance. The provider
+// maintains internal state during the authentication handshake.
+//
+// # Authentication Flow
+//
+// The typical flow is:
+//  1. Client calls Step(nil) -> returns Initial Token
+//  2. Client sends Token to Server
+//  3. Server responds with Server Token (Challenge)
+//  4. Client calls Step(Server Token) -> returns Response Token
+//  5. Repeat until Complete() returns true.
 type SecurityProvider interface {
 	// Step processes an input token (challenge) and produces an output token (response).
 	// On the first call, inputToken should be nil.
