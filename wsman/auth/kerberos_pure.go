@@ -49,7 +49,7 @@ func NewPureKerberosProvider(cfg PureKerberosConfig, targetSPN string) (*PureKer
 	}
 	conf, err := config.Load(cfg.Krb5ConfPath)
 	if err != nil {
-		return nil, fmt.Errorf("load krb5.conf: %w", err)
+		return nil, fmt.Errorf("load krb5.conf from %s: %w", cfg.Krb5ConfPath, err)
 	}
 
 	var cl *client.Client
@@ -58,14 +58,14 @@ func NewPureKerberosProvider(cfg PureKerberosConfig, targetSPN string) (*PureKer
 	if cfg.KeytabPath != "" {
 		kt, err := keytab.Load(cfg.KeytabPath)
 		if err != nil {
-			return nil, fmt.Errorf("load keytab: %w", err)
+			return nil, fmt.Errorf("load keytab from %s: %w", cfg.KeytabPath, err)
 		}
 		cl = client.NewWithKeytab(cfg.Credentials.Username, cfg.Realm, kt, conf, client.DisablePAFXFAST(true))
 	} else if cfg.CCachePath != "" {
 		// 2. Try CCache
 		cc, err := credentials.LoadCCache(cfg.CCachePath)
 		if err != nil {
-			return nil, fmt.Errorf("load ccache: %w", err)
+			return nil, fmt.Errorf("load ccache from %s: %w", cfg.CCachePath, err)
 		}
 		cl, err = client.NewFromCCache(cc, conf, client.DisablePAFXFAST(true))
 		if err != nil {
@@ -124,28 +124,29 @@ func (p *PureKerberosProvider) Step(_ context.Context, inputToken []byte) ([]byt
 		}
 	} else {
 		// Process Server Challenge (Mutual Auth / Continued Step)
-		// gokrb5 doesn't expose a clean "Step" function on SPNEGOClient public API easily
-		// that handles the "AcceptSecContext" side or the "Continue" side for client?
-		// Actually, SPNEGOClient IS the client-side context.
-		// It has no public method to handling the server's response token for mutual auth currently exposed well?
-		// Wait, let's check the library source or docs.
-		// SPNEGOClient returns a *SPNEGO struct.
-		// It has InitSecContext() -> (authtoken, error).
+		//
+		// gokrb5's SPNEGO client doesn't expose a clean API for processing
+		// the server's mutual auth response token. The InitSecContext() method
+		// generates the client token but doesn't have a corresponding method
+		// to verify the server's response.
+		//
+		// For standard Kerberos HTTP auth (which is typically 1-leg), this is
+		// acceptable - the server accepts our token and returns 200 OK with
+		// an optional mutual auth token. If mutual auth is required, we should
+		// validate the server's response, but gokrb5 doesn't expose this API.
+		//
+		// Safety check: ensure we already sent our token before accepting
+		// the server's response. This prevents accepting a server token
+		// without ever having authenticated.
+		if !p.isComplete {
+			return nil, false, fmt.Errorf(
+				"received server token before client authentication completed (mutual auth not supported)")
+		}
 
-		// NOTE: gokrb5/v8/spnego implementation is primarily focused on the simple HTTP case
-		// where the client sends one token.
-		// It DOES support mutual auth but the API is:
-		// CheckPrincipal(tkt Ticket, service string)
-		// It doesn't seem to perfectly align with a generic "Step" function for multi-leg SPNEGO.
-
-		// However, standard Kerberos HTTP auth is often 1-leg (Optimistic).
-		// If mutual auth is required, the server sends a token back.
-
-		// For now, let's assume 1-leg for the initial implementation as gokrb5 is often used.
-		// If inputToken is present, it's likely the server's final mutual auth token.
-		// We can try to process it, but if gokrb5 doesn't support it easily, we might just return success
-		// if we are already done.
-		return nil, false, nil // Treat as done for 1-leg for now
+		// Already complete - the server sent a mutual auth token
+		// We cannot validate it with gokrb5's current API, so we accept it.
+		// TODO: Implement mutual auth validation when gokrb5 supports it.
+		return nil, false, nil
 	}
 
 	if err != nil {
