@@ -28,14 +28,14 @@ func NewKerberosProvider(cfg KerberosProviderConfig) (SecurityProvider, error) {
 	}
 
 	// Fall back to gokrb5 for keytab/ccache
-	gokrb5Cfg := Gokrb5Config{
+	gokrb5Cfg := PureKerberosConfig{
 		Realm:        cfg.Realm,
 		Krb5ConfPath: cfg.Krb5ConfPath,
 		KeytabPath:   cfg.KeytabPath,
 		CCachePath:   cfg.CCachePath,
 		Credentials:  cfg.Credentials,
 	}
-	return NewGokrb5Provider(gokrb5Cfg, cfg.TargetSPN)
+	return NewPureKerberosProvider(gokrb5Cfg, cfg.TargetSPN)
 }
 
 // KerberosProviderConfig holds unified config for any Kerberos provider.

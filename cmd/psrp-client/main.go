@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/smnsjas/go-psrp/client"
@@ -51,6 +52,7 @@ func main() {
 	useKerberos := flag.Bool("kerberos", false, "Use Kerberos authentication")
 	realm := flag.String("realm", "", "Kerberos realm (e.g., EXAMPLE.COM)")
 	krb5Conf := flag.String("krb5conf", "", "Path to krb5.conf file")
+	ccache := flag.String("ccache", "", "Path to Kerberos credential cache (e.g. /tmp/krb5cc_1000)")
 
 	flag.Parse()
 
@@ -66,9 +68,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Get password from: flag > env var > stdin prompt
-	pass := getPassword(*password)
-	if pass == "" {
+	// Check for Kerberos cred cache first (SSO)
+	var pass string
+	hasCache := *ccache != "" || os.Getenv("KRB5CCNAME") != ""
+
+	if *useKerberos && hasCache {
+		// Skip password prompt if using cache
+	} else {
+		// Get password from: flag > env var > stdin prompt
+		pass = getPassword(*password)
+	}
+
+	if pass == "" && !*useKerberos && !hasCache {
 		fmt.Fprintln(os.Stderr, "Error: password is required (use -pass, PSRP_PASSWORD env, or stdin)")
 		os.Exit(1)
 	}
@@ -85,6 +96,11 @@ func main() {
 		cfg.AuthType = client.AuthKerberos
 		cfg.Realm = *realm
 		cfg.Krb5ConfPath = *krb5Conf
+		cfg.CCachePath = *ccache
+		// Default to KRB5CCNAME env var if flag not set
+		if cfg.CCachePath == "" {
+			cfg.CCachePath = os.Getenv("KRB5CCNAME")
+		}
 		if cfg.Realm == "" {
 			cfg.Realm = os.Getenv("PSRP_REALM")
 		}
@@ -162,10 +178,9 @@ func getPassword(flagValue string) string {
 	// 3. Prompt for password (hide input if terminal)
 	fmt.Fprint(os.Stderr, "Password: ")
 
-	fd := int(os.Stdin.Fd())
-	if term.IsTerminal(fd) {
+	if term.IsTerminal(syscall.Stdin) {
 		// Terminal: read password without echo
-		passBytes, err := term.ReadPassword(fd)
+		passBytes, err := term.ReadPassword(syscall.Stdin)
 		fmt.Fprintln(os.Stderr) // newline after password
 		if err != nil {
 			return ""

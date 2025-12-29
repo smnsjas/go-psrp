@@ -27,11 +27,10 @@ const (
 	// AuthBasic uses HTTP Basic authentication.
 	AuthBasic AuthType = iota
 	// AuthNTLM uses NTLM authentication.
+	// AuthNTLM uses NTLM authentication.
 	AuthNTLM
-	// AuthKerberos uses Kerberos authentication (pure Go gokrb5 or Windows SSPI).
+	// AuthKerberos uses Kerberos authentication (via gokrb5).
 	AuthKerberos
-	// AuthKerberosSSO uses Windows SSO with current user credentials (Windows only).
-	AuthKerberosSSO
 )
 
 // Config holds configuration for a PSRP client.
@@ -147,13 +146,12 @@ func New(hostname string, cfg Config) (*Client, error) {
 	switch cfg.AuthType {
 	case AuthNTLM:
 		authenticator = auth.NewNTLMAuth(creds)
-	case AuthKerberos, AuthKerberosSSO:
+	case AuthKerberos:
 		// Target SPN is typically HTTP/hostname
 		targetSPN := fmt.Sprintf("HTTP/%s", hostname)
 
 		krbCfg := auth.KerberosProviderConfig{
 			TargetSPN:    targetSPN,
-			UseSSO:       cfg.AuthType == AuthKerberosSSO,
 			Realm:        cfg.Realm,
 			Krb5ConfPath: cfg.Krb5ConfPath,
 			KeytabPath:   cfg.KeytabPath,
