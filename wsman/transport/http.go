@@ -82,9 +82,14 @@ func WithInsecureSkipVerify(skip bool) HTTPTransportOption {
 }
 
 // WithTLSConfig sets a custom TLS configuration.
+// NOTE: MinVersion is enforced to be at least TLS 1.2 for security.
 func WithTLSConfig(cfg *tls.Config) HTTPTransportOption {
 	return func(t *HTTPTransport) {
 		transport := t.ensureHTTPTransport()
+		// Enforce minimum TLS 1.2 regardless of user config
+		if cfg.MinVersion < tls.VersionTLS12 {
+			cfg.MinVersion = tls.VersionTLS12
+		}
 		transport.TLSClientConfig = cfg
 	}
 }
