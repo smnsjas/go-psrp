@@ -85,7 +85,7 @@ func DefaultConfig() Config {
 
 // Validate checks that the configuration is valid.
 func (c *Config) Validate() error {
-	if c.Username == "" {
+	if c.Username == "" && !auth.SupportsSSO() {
 		return errors.New("username is required")
 	}
 
@@ -98,7 +98,8 @@ func (c *Config) Validate() error {
 	}
 
 	// Password required for Basic, NTLM, and Kerberos/Negotiate without ccache
-	if c.Password == "" {
+	// Exception: SSO mode (empty username on Windows) doesn't need password
+	if c.Password == "" && c.Username != "" {
 		return errors.New("password is required")
 	}
 	return nil
@@ -161,6 +162,7 @@ func New(hostname string, cfg Config) (*Client, error) {
 			KeytabPath:   cfg.KeytabPath,
 			CCachePath:   cfg.CCachePath,
 			Credentials:  &creds,
+			UseSSO:       auth.SupportsSSO() && cfg.Username == "",
 		}
 
 		provider, err := auth.NewKerberosProvider(krbCfg)
@@ -183,6 +185,7 @@ func New(hostname string, cfg Config) (*Client, error) {
 			KeytabPath:   cfg.KeytabPath,
 			CCachePath:   cfg.CCachePath,
 			Credentials:  &creds,
+			UseSSO:       auth.SupportsSSO() && cfg.Username == "",
 		}
 
 		provider, err := auth.NewKerberosProvider(krbCfg)

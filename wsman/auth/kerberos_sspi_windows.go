@@ -65,6 +65,11 @@ func (p *SSPIProvider) Step(ctx context.Context, inputToken []byte) ([]byte, boo
 		}
 	} else {
 		// Subsequent steps - update context with server token
+		if len(inputToken) == 0 {
+			// Server sent bare "Negotiate" after we already authenticated
+			// This means authentication was rejected
+			return nil, false, fmt.Errorf("server rejected authentication (received bare Negotiate after sending response)")
+		}
 		p.complete, outputToken, err = p.ctx.Update(inputToken)
 		if err != nil {
 			return nil, false, fmt.Errorf("update security context: %w", err)
