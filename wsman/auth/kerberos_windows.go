@@ -38,17 +38,6 @@ func NewKerberosProvider(cfg KerberosProviderConfig) (SecurityProvider, error) {
 	return NewPureKerberosProvider(gokrb5Cfg, cfg.TargetSPN)
 }
 
-// KerberosProviderConfig holds unified config for any Kerberos provider.
-type KerberosProviderConfig struct {
-	TargetSPN    string
-	UseSSO       bool // Windows only - use current user credentials
-	Realm        string
-	Krb5ConfPath string
-	KeytabPath   string
-	CCachePath   string
-	Credentials  *Credentials
-}
-
 // SupportsSSO returns true if the platform supports SSO.
 func SupportsSSO() bool {
 	return true

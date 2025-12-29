@@ -9,6 +9,10 @@ import (
 	"strings"
 )
 
+// maxNegotiateRetries is the maximum number of authentication attempts.
+// This prevents infinite loops from malicious servers.
+const maxNegotiateRetries = 5
+
 // NegotiateAuth implements SPNEGO authentication using a pluggable SecurityProvider.
 type NegotiateAuth struct {
 	provider SecurityProvider
@@ -56,69 +60,71 @@ func (rt *negotiateRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 		}
 	}
 
-	// Clone request to avoid data races
-	reqClone := req.Clone(req.Context())
-	if bodyBytes != nil {
-		reqClone.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-	}
+	var resp *http.Response
+	var serverToken []byte
+	var clientToken []byte
 
-	// Execute primitive request
-	resp, err := rt.base.RoundTrip(reqClone)
-	if err != nil {
-		return nil, err
-	}
+	// Bounded retry loop for multi-leg SPNEGO (supports NTLM which needs 3 legs)
+	for attempt := 0; attempt < maxNegotiateRetries; attempt++ {
+		// Clone request to avoid data races
+		reqClone := req.Clone(req.Context())
+		if bodyBytes != nil {
+			reqClone.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		}
 
-	// Check for 401 and Negotiate header
-	if resp.StatusCode == http.StatusUnauthorized {
+		// Add auth header if we have a token from provider
+		if clientToken != nil {
+			reqClone.Header.Set("Authorization",
+				fmt.Sprintf("Negotiate %s", base64.StdEncoding.EncodeToString(clientToken)))
+		}
+
+		// Execute request
+		var err error
+		resp, err = rt.base.RoundTrip(reqClone)
+		if err != nil {
+			return nil, err
+		}
+
+		// Success - return response
+		if resp.StatusCode != http.StatusUnauthorized {
+			return resp, nil
+		}
+
+		// Check for Negotiate header
 		authHeader := resp.Header.Get("WWW-Authenticate")
-		if strings.Contains(strings.ToLower(authHeader), "negotiate") {
-			// Found Negotiate challenge.
-			// Extract token if present (for mutual auth or multi-leg, though initial 401 usually has empty "Negotiate")
-			var serverToken []byte
-			parts := strings.SplitN(authHeader, " ", 2)
-			if len(parts) == 2 && strings.TrimSpace(parts[1]) != "" {
-				// We have a token blob
-				token, decodeErr := base64.StdEncoding.DecodeString(strings.TrimSpace(parts[1]))
-				if decodeErr == nil {
-					serverToken = token
-				}
-				// Decode errors ignored: server may just send "Negotiate" without token
+		if !strings.Contains(strings.ToLower(authHeader), "negotiate") {
+			// Not a Negotiate challenge, return as-is
+			return resp, nil
+		}
+
+		// Extract server token if present
+		serverToken = nil
+		parts := strings.SplitN(authHeader, " ", 2)
+		if len(parts) == 2 && strings.TrimSpace(parts[1]) != "" {
+			token, decodeErr := base64.StdEncoding.DecodeString(strings.TrimSpace(parts[1]))
+			if decodeErr == nil {
+				serverToken = token
 			}
+			// Decode errors ignored: server may just send "Negotiate" without token
+		}
 
-			// Generate our token
-			clientToken, continueNeeded, err := rt.provider.Step(req.Context(), serverToken)
-			if err != nil {
-				return resp, fmt.Errorf("negotiate step: %w", err)
-			}
+		// Generate our response token
+		var continueNeeded bool
+		clientToken, continueNeeded, err = rt.provider.Step(req.Context(), serverToken)
+		if err != nil {
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("negotiate step failed: %w", err)
+		}
 
-			// Retry the request with Authorization header
-			// We must close the previous response body
-			_ = resp.Body.Close() // Error intentionally ignored
+		// Close response body before retry
+		_ = resp.Body.Close()
 
-			retryReq := req.Clone(req.Context())
-			retryReq.Header.Set("Authorization", fmt.Sprintf("Negotiate %s", base64.StdEncoding.EncodeToString(clientToken)))
-			// Use buffered body for retry
-			if bodyBytes != nil {
-				retryReq.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-			}
-
-			retryResp, err := rt.base.RoundTrip(retryReq)
-			if err != nil {
-				return nil, err
-			}
-
-			// If generic GSSAPI loop needed (continueNeeded), we might need to handle 401 again?
-			// Standard Kerberos is usually 1 round trip after 401.
-			// NTLM-over-Negotiate is 3 legs (Type 1 -> Challenge -> Type 3).
-			// Our interface supports this via `continueNeeded`.
-
-			// Note: continueNeeded handling for multi-leg SPNEGO is not implemented.
-			// Standard Kerberos is 1-leg, NTLM uses dedicated provider.
-			_ = continueNeeded // Silence unused warning if multi-leg not implemented
-
-			return retryResp, nil
+		// If no more steps needed and we already sent a token, we're done
+		if !continueNeeded && attempt > 0 {
+			// Auth complete but server still returning 401 - fail
+			break
 		}
 	}
 
-	return resp, nil
+	return nil, fmt.Errorf("negotiate authentication failed after %d attempts", maxNegotiateRetries)
 }
