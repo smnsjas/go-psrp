@@ -72,9 +72,8 @@ func main() {
 	var pass string
 	hasCache := *ccache != "" || os.Getenv("KRB5CCNAME") != ""
 
-	if *useKerberos && hasCache {
-		// Skip password prompt if using cache
-	} else {
+	// Get password unless using Kerberos with cached credentials
+	if !*useKerberos || !hasCache {
 		// Get password from: flag > env var > stdin prompt
 		pass = getPassword(*password)
 	}

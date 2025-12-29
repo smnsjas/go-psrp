@@ -39,10 +39,10 @@ This library builds on [go-psrpcore](https://github.com/smnsjas/go-psrpcore) by 
 ## Features
 
 - 🔌 **WSMan/WinRM Transport** - HTTP/HTTPS with SOAP
-- 🔐 **Authentication** - Basic, NTLM (Kerberos planned)
+- 🔐 **Authentication** - Basic, NTLM, and Kerberos (Active Directory)
 - 📦 **Full PSRP Support** - RunspacePools, Pipelines, Output streams
 - 🚀 **High-Level API** - Simple command execution
-- 🛡️ **Secure** - TLS 1.2+ by default
+- 🛡️ **Secure** - TLS 1.2+ by default, pure Go implementation
 
 ## Installation
 
@@ -110,6 +110,30 @@ cfg.Password = "password"
 cfg.AuthType = client.AuthNTLM
 ```
 
+### Using Kerberos Authentication (Active Directory)
+
+```go
+cfg := client.DefaultConfig()
+cfg.Username = "user@REALM"
+cfg.Password = "password"
+cfg.AuthType = client.AuthKerberos
+cfg.Realm = "WIN.DOMAIN.COM"
+cfg.Krb5ConfPath = "/etc/krb5.conf" // Optional, defaults to /etc/krb5.conf
+cfg.UseTLS = true
+cfg.Port = 5986
+```
+
+For SSO (using pre-existing Kerberos tickets from `kinit`):
+
+```go
+cfg := client.DefaultConfig()
+cfg.Username = "user@REALM"
+cfg.AuthType = client.AuthKerberos
+cfg.Realm = "WIN.DOMAIN.COM"
+cfg.CCachePath = "/tmp/krb5cc_1000" // Or set KRB5CCNAME env var
+cfg.UseTLS = true
+```
+
 ### HTTP (Non-TLS) Connection
 
 ```go
@@ -143,11 +167,15 @@ go build ./cmd/psrp-client
 |------|-------------|---------|
 | `-server` | WinRM server hostname | (required) |
 | `-user` | Username | (required) |
-| `-pass` | Password | (required) |
+| `-pass` | Password | (required unless using ccache) |
 | `-script` | PowerShell script to execute | `Get-Process` |
 | `-tls` | Use HTTPS | `false` |
 | `-port` | WinRM port | 5985 (HTTP), 5986 (HTTPS) |
 | `-ntlm` | Use NTLM auth | `false` (Basic) |
+| `-kerberos` | Use Kerberos auth | `false` |
+| `-realm` | Kerberos realm (e.g., WIN.DOMAIN.COM) | (auto-detect) |
+| `-krb5conf` | Path to krb5.conf | `/etc/krb5.conf` |
+| `-ccache` | Path to Kerberos credential cache | `$KRB5CCNAME` |
 | `-insecure` | Skip TLS verification | `false` |
 | `-timeout` | Operation timeout | `60s` |
 
@@ -158,7 +186,7 @@ go build ./cmd/psrp-client
 | `client` | High-level API: `New()`, `Connect()`, `Execute()`, `Close()` |
 | `powershell` | PSRP bridge, `RunspacePool`, `Pipeline`, `WSManTransport` |
 | `wsman` | WSMan client, SOAP envelope builder, operations |
-| `wsman/auth` | Authentication: `BasicAuth`, `NTLMAuth` |
+| `wsman/auth` | Authentication: `BasicAuth`, `NTLMAuth`, `NegotiateAuth` (Kerberos) |
 | `wsman/transport` | HTTP/TLS transport layer |
 
 ## Configuration

@@ -73,7 +73,13 @@ func NewPureKerberosProvider(cfg PureKerberosConfig, targetSPN string) (*PureKer
 		}
 	} else if cfg.Credentials != nil {
 		// 3. Password
-		cl = client.NewWithPassword(cfg.Credentials.Username, cfg.Realm, cfg.Credentials.Password, conf, client.DisablePAFXFAST(true))
+		cl = client.NewWithPassword(
+			cfg.Credentials.Username,
+			cfg.Realm,
+			cfg.Credentials.Password,
+			conf,
+			client.DisablePAFXFAST(true),
+		)
 	} else {
 		return nil, fmt.Errorf("no credentials provided (keytab, ccache, or password required)")
 	}
@@ -85,7 +91,7 @@ func NewPureKerberosProvider(cfg PureKerberosConfig, targetSPN string) (*PureKer
 }
 
 // Step performs a GSS-API/SPNEGO step.
-func (p *PureKerberosProvider) Step(ctx context.Context, inputToken []byte) ([]byte, bool, error) {
+func (p *PureKerberosProvider) Step(_ context.Context, inputToken []byte) ([]byte, bool, error) {
 	// Perform Login if not already logged in
 	// Note: gokrb5 client handles TGT renewal internally for us ideally,
 	// but we trigger an initial login here.
