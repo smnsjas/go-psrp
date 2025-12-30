@@ -70,6 +70,7 @@ func (rt *negotiateRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 		reqClone := req.Clone(req.Context())
 		if bodyBytes != nil {
 			reqClone.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			reqClone.ContentLength = int64(len(bodyBytes))
 		}
 
 		// Add auth header if we have a token from provider
