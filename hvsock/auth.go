@@ -141,12 +141,6 @@ func ConnectAndAuthenticate(ctx context.Context, vmID uuid.UUID, domain, user, p
 	return psConn, nil
 }
 
-// dialService connects to a specific HvSocket service on the VM
-// Kept for backward compatibility if needed, but ConnectAndAuthenticate uses dialServiceWithTimeout
-func dialService(ctx context.Context, vmID, serviceID uuid.UUID) (net.Conn, error) {
-	return DialService(ctx, vmID, serviceID)
-}
-
 // authenticateWithBroker handles the first-stage authentication (credential exchange)
 // Returns the authentication token for the second stage
 func authenticateWithBroker(conn net.Conn, domain, user, pass, configName string) (string, error) {
