@@ -2,10 +2,17 @@ package powershell
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
+	"fmt"
+	"io"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/smnsjas/go-psrp/wsman"
+	"github.com/smnsjas/go-psrpcore/pipeline"
+	"github.com/smnsjas/go-psrpcore/runspace"
 )
 
 // PoolClient defines the WSMan operations needed by RunspacePool.
@@ -16,6 +23,7 @@ type PoolClient interface {
 	Send(ctx context.Context, shellID, commandID, stream string, data []byte) error
 	Receive(ctx context.Context, shellID, commandID string) (*wsman.ReceiveResult, error)
 	Signal(ctx context.Context, shellID, commandID, code string) error
+	CloseIdleConnections()
 }
 
 // Errors for RunspacePool operations.
@@ -24,107 +32,144 @@ var (
 	ErrPoolClosed    = errors.New("runspace pool already closed")
 )
 
-// RunspacePool manages a PowerShell runspace pool over WSMan.
-// It wraps the lifecycle of a WSMan shell and provides methods for
-// creating and managing PowerShell pipelines.
-type RunspacePool struct {
+// WSManBackend manages a PowerShell runspace pool over WSMan.
+// It implements the RunspaceBackend interface.
+type WSManBackend struct {
 	mu sync.RWMutex
 
-	client  PoolClient
-	shellID string
-	opened  bool
-	closed  bool
+	client    PoolClient
+	shellID   string
+	opened    bool
+	closed    bool
+	transport *WSManTransport // Reference to the transport for configuration
 }
 
-// NewRunspacePool creates a new RunspacePool using the given WSMan client.
-func NewRunspacePool(client PoolClient) *RunspacePool {
-	return &RunspacePool{
-		client: client,
+// NewWSManBackend creates a new WSManBackend using the given WSMan client.
+func NewWSManBackend(client PoolClient, transport *WSManTransport) *WSManBackend {
+	return &WSManBackend{
+		client:    client,
+		transport: transport,
 	}
 }
 
 // ShellID returns the WSMan shell ID for this pool.
-func (p *RunspacePool) ShellID() string {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return p.shellID
+func (b *WSManBackend) ShellID() string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.shellID
 }
 
-// Open creates the WSMan shell and initializes the runspace pool.
-func (p *RunspacePool) Open(ctx context.Context, creationXML string) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+// Connect implements RunspaceBackend. For WSMan, the transport is already set up.
+func (b *WSManBackend) Connect(ctx context.Context) error {
+	return nil
+}
 
-	if p.closed {
+// Transport returns the underlying WSMan transport.
+func (b *WSManBackend) Transport() io.ReadWriter {
+	return b.transport
+}
+
+// Init initializes the WSMan shell and PSRP pool.
+func (b *WSManBackend) Init(ctx context.Context, pool *runspace.Pool) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.closed {
 		return ErrPoolClosed
 	}
-	if p.opened {
+	if b.opened {
 		return nil // Already opened
 	}
 
+	// 1. Get Handshake fragments from PSRP pool
+	frags, err := pool.GetHandshakeFragments()
+	if err != nil {
+		return err
+	}
+	creationXML := base64.StdEncoding.EncodeToString(frags)
+
+	// 2. Create WSMan Shell
 	// Add protocolversion option as required by PSRP
 	options := map[string]string{
 		"protocolversion": "2.3",
 	}
 
-	shellID, err := p.client.Create(ctx, options, creationXML)
+	shellID, err := b.client.Create(ctx, options, creationXML)
 	if err != nil {
 		return err
 	}
 
-	p.shellID = shellID
-	p.opened = true
-	return nil
+	b.shellID = shellID
+	b.opened = true
+
+	// 3. Open PSRP pool (skip handshake send as we did it in Create)
+	pool.SkipHandshakeSend = true
+	return pool.Open(ctx)
 }
 
 // Close terminates all pipelines and closes the WSMan shell.
-func (p *RunspacePool) Close(ctx context.Context) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+func (b *WSManBackend) Close(ctx context.Context) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 
-	if !p.opened {
+	if !b.opened {
 		return ErrPoolNotOpened
 	}
-	if p.closed {
+	if b.closed {
 		return nil // Already closed
 	}
 
-	err := p.client.Delete(ctx, p.shellID)
+	err := b.client.Delete(ctx, b.shellID)
 	if err != nil {
 		return err
 	}
 
-	p.closed = true
+	b.closed = true
 	return nil
 }
 
-// CreatePipeline creates a new PowerShell pipeline in this pool.
-func (p *RunspacePool) CreatePipeline(ctx context.Context) (*Pipeline, error) {
-	return p.CreatePipelineWithArgs(ctx, "", "")
-}
+// PreparePipeline creates the WSMan command and configures the transport.
+func (b *WSManBackend) PreparePipeline(ctx context.Context, p *pipeline.Pipeline, payload string) (func(), error) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
 
-// CreatePipelineWithArgs creates a new PowerShell pipeline with the given CommandID and Arguments.
-// For PSRP over WSMan, the commandID should match the go-psrpcore Pipeline ID, and
-// the arguments should contain the base64-encoded CreatePipeline fragment.
-func (p *RunspacePool) CreatePipelineWithArgs(ctx context.Context, commandID, arguments string) (*Pipeline, error) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
-	if !p.opened {
+	if !b.opened {
 		return nil, ErrPoolNotOpened
 	}
-	if p.closed {
+	if b.closed {
 		return nil, ErrPoolClosed
 	}
 
-	returnedID, err := p.client.Command(ctx, p.shellID, commandID, arguments)
+	// 1. Create WSMan Command (Pipeline)
+	// We use the ID from the pipeline to ensure proper routing of Receive responses
+	pipelineID := strings.ToUpper(p.ID().String())
+
+	returnedID, err := b.client.Command(ctx, b.shellID, pipelineID, payload)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create wsman command: %w", err)
 	}
 
-	return &Pipeline{
-		client:    p.client,
-		shellID:   p.shellID,
-		commandID: returnedID,
-	}, nil
+	// 2. Configure the transport for this pipeline
+	// This tells the transport that any writes for this pipeline ID should go to this command ID
+	b.transport.Configure(b.client, b.shellID, returnedID)
+
+	// 3. Setup cleanup function
+	cleanup := func() {
+		// Terminate the command on WSMan side
+		// Use a detached context in case the original context is cancelled?
+		// For now, use a background context or the passed context if available?
+		// The cleanup is called after pipeline wait, so we often want a fresh context.
+		// However, we don't have one here.
+		// We'll create a new context with timeout for cleanup.
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = b.client.Signal(ctx, b.shellID, returnedID, SignalTerminate)
+	}
+
+	// 4. Skip PSRP Invoke Send
+	// Since we sent the CreatePipeline message in the WSMan Command arguments,
+	// we must tell go-psrpcore NOT to send it again over the transport.
+	p.SkipInvokeSend()
+
+	return cleanup, nil
 }
