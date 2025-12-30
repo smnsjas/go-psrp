@@ -15,6 +15,7 @@ require (
 )
 
 require (
+	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/go-crypt/x v0.4.10 // indirect
 	github.com/go-krb5/x v0.3.0 // indirect
 	golang.org/x/crypto v0.46.0 // indirect

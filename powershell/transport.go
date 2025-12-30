@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"io"
 	"sync"
-
-	"github.com/smnsjas/go-psrp/wsman"
 )
 
 // WSManTransport implements io.ReadWriter over WSMan Send/Receive operations.
@@ -17,7 +15,7 @@ import (
 type WSManTransport struct {
 	mu sync.Mutex
 
-	client    *wsman.Client
+	client    PoolClient
 	shellID   string
 	commandID string
 	ctx       context.Context
@@ -29,7 +27,7 @@ type WSManTransport struct {
 
 // NewWSManTransport creates a transport that bridges WSMan to io.ReadWriter.
 // The client, shellID, and commandID can be set later via Configure if needed.
-func NewWSManTransport(client *wsman.Client, shellID, commandID string) *WSManTransport {
+func NewWSManTransport(client PoolClient, shellID, commandID string) *WSManTransport {
 	return &WSManTransport{
 		client:    client,
 		shellID:   shellID,
@@ -135,7 +133,7 @@ func (t *WSManTransport) Close() error {
 
 // Configure sets the WSMan client and IDs for the transport.
 // This allows the transport to be created before the shell/command are established.
-func (t *WSManTransport) Configure(client *wsman.Client, shellID, commandID string) {
+func (t *WSManTransport) Configure(client PoolClient, shellID, commandID string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.client = client

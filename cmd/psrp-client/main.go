@@ -54,11 +54,22 @@ func main() {
 	krb5Conf := flag.String("krb5conf", "", "Path to krb5.conf file")
 	ccache := flag.String("ccache", "", "Path to Kerberos credential cache (e.g. /tmp/krb5cc_1000)")
 
+	// HvSocket (PowerShell Direct) flags
+	useHvSocket := flag.Bool("hvsocket", false, "Use Hyper-V Socket (PowerShell Direct) transport")
+	vmID := flag.String("vmid", "", "VM GUID for HvSocket connection")
+	configName := flag.String("configname", "", "PowerShell configuration name (optional, for HvSocket)")
+	domain := flag.String("domain", ".", "Domain for HvSocket auth (use '.' for local accounts)")
+
 	flag.Parse()
 
 	// Validate required flags
-	if *server == "" {
-		fmt.Fprintln(os.Stderr, "Error: -server is required")
+	if *server == "" && !*useHvSocket {
+		fmt.Fprintln(os.Stderr, "Error: -server is required (or use -hvsocket with -vmid)")
+		flag.Usage()
+		os.Exit(1)
+	}
+	if *useHvSocket && *vmID == "" {
+		fmt.Fprintln(os.Stderr, "Error: -vmid is required when using -hvsocket")
 		flag.Usage()
 		os.Exit(1)
 	}
@@ -125,6 +136,14 @@ func main() {
 		cfg.Port = *port
 	} else if *useTLS {
 		cfg.Port = 5986
+	}
+
+	// HvSocket transport
+	if *useHvSocket {
+		cfg.Transport = client.TransportHvSocket
+		cfg.VMID = *vmID
+		cfg.ConfigurationName = *configName
+		cfg.Domain = *domain
 	}
 
 	// Create client

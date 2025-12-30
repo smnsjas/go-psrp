@@ -6,7 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"strings"
+	"io"
 	"sync"
 	"time"
 
@@ -33,6 +33,16 @@ const (
 	AuthNTLM
 	// AuthKerberos uses Kerberos authentication only (no NTLM fallback).
 	AuthKerberos
+)
+
+// TransportType specifies the transport mechanism.
+type TransportType int
+
+const (
+	// TransportWSMan uses WSMan (HTTP/HTTPS) transport.
+	TransportWSMan TransportType = iota
+	// TransportHvSocket uses Hyper-V Socket (PowerShell Direct) transport.
+	TransportHvSocket
 )
 
 // Config holds configuration for a PSRP client.
@@ -71,6 +81,15 @@ type Config struct {
 	KeytabPath string
 	// CCachePath is the path to the credential cache (optional).
 	CCachePath string
+
+	// Transport specifies the transport mechanism (WSMan or HvSocket).
+	Transport TransportType
+
+	// VMID is the Hyper-V VM GUID (Required for TransportHvSocket).
+	VMID string
+
+	// ConfigurationName is the PowerShell configuration name (Optional, for HvSocket).
+	ConfigurationName string
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -113,15 +132,14 @@ type Client struct {
 	config   Config
 	endpoint string
 
-	transport     *transport.HTTPTransport
-	wsman         *wsman.Client
-	pool          *powershell.RunspacePool
-	psrpPool      *runspace.Pool
-	psrpTransport *powershell.WSManTransport
-	poolID        uuid.UUID
-	connected     bool
-	closed        bool
-	messageID     uint64 // Tracks PSRP message ObjectID sequence
+	transport *transport.HTTPTransport
+	wsman     *wsman.Client
+	backend   powershell.RunspaceBackend
+	psrpPool  *runspace.Pool
+	poolID    uuid.UUID
+	connected bool
+	closed    bool
+	messageID uint64 // Tracks PSRP message ObjectID sequence
 }
 
 // New creates a new PSRP client.
@@ -203,13 +221,72 @@ func New(hostname string, cfg Config) (*Client, error) {
 	// Wrap transport with auth
 	tr.Client().Transport = authenticator.Transport(tr.Client().Transport)
 
-	return &Client{
-		hostname:  hostname,
-		config:    cfg,
-		endpoint:  endpoint,
-		transport: tr,
-		wsman:     wsman.NewClient(endpoint, tr),
-	}, nil
+	switch cfg.Transport {
+	case TransportHvSocket:
+		// Convert String VMID to UUID
+		if _, err := uuid.Parse(cfg.VMID); err != nil {
+			return nil, fmt.Errorf("invalid vmid: %w", err)
+		}
+		// Create HvSocketBackend
+		// We reuse the pool ID logic inside Connect()? No, pool ID is created in Connect().
+		// But NewHvSocketBackend takes poolID?
+		// Wait, NewHvSocketBackend signature takes poolID.
+		// But in Connect(), we generate poolID for the runspace.New call!
+		// If HvSocketBackend owns the Adapter (which needs pool ID), we should pass it AFTER creation?
+		// Or creating it in Connect()?
+		// NewHvSocketBackend currently takes poolID.
+		// Problem: RunspaceBackend.Init takes `*runspace.Pool`.
+		// `runspace.New` takes `transport`.
+		// `HvSocketBackend` Creates the transport (adapter).
+		// So `HvSocketBackend` creates `Adapter`. Adapter needs `runspaceGUID`.
+		// So `HvSocketBackend` needs `runspaceGUID` (PoolID).
+
+		// This means we must decide PoolID BEFORE creating Backend?
+		// But `Client.Connect` logic:
+		// 1. Create Backend
+		// 2. Connect
+		// 3. Get Transport
+		// 4. Create Pool (generates ID?) -> wait, runspace.New TAKES id.
+		// So we generate ID in Client.Connect before or during.
+
+		// In previous logic (WSMan), Client generates poolID.
+		// So Client should generate PoolID in Connect() and pass it?
+		// But `c.backend` is created in `New` or `Connect`?
+		// In my recent refactor of `Connect`, `c.backend` is created IN `Connect`.
+		// YES.
+
+		// So `New` function in `client.go` should NOT create backend?
+		// Wait, `New` returns `*Client`. `Client` struct has `backend` field.
+		// Currently `New` does NOT create backend. `Connect` does.
+		// But `New` sets `wsman` client.
+
+		// So in `New`, we setup `transport` variable.
+		// But for HvSocket, we don't need `transport` or `wsman` client.
+
+		// So `New` should be lighter?
+		// Existing `New` logic creates `transport.HTTPTransport` and `wsman.NewClient`.
+		// This is WSMan specific.
+
+		// If TransportHvSocket, we don't need HTTP transport.
+		// Refactor `New` to branch.
+
+		return &Client{
+			hostname: hostname,
+			config:   cfg,
+			endpoint: "", // Not relevant for HvSocket? Or VmId?
+			// wsman: nil, // Will be nil for HvSocket
+		}, nil
+
+	default: // WSMan
+		// ... existing WSMan setup ...
+		return &Client{
+			hostname:  hostname,
+			config:    cfg,
+			endpoint:  endpoint,
+			transport: tr,
+			wsman:     wsman.NewClient(endpoint, tr),
+		}, nil
+	}
 }
 
 // Endpoint returns the WinRM endpoint URL.
@@ -229,34 +306,57 @@ func (c *Client) Connect(ctx context.Context) error {
 		return nil
 	}
 
-	// 1. Setup PSRP Pool logic EARLY
-	// Create unconfigured transport first so we can create PSRP pool
-	c.psrpTransport = powershell.NewWSManTransport(nil, "", "")
-	c.psrpTransport.SetContext(ctx)
-
-	// Create go-psrpcore Pool using our (currently unconfigured) transport
+	// 1. Create Backend
+	// Note: We generate poolID here to pass to backend if needed (HvSocket needs it for Adapter)
 	c.poolID = uuid.New()
-	c.psrpPool = runspace.New(c.psrpTransport, c.poolID)
 
-	// Get the PSRP handshake fragments to embed in creationXml
-	frags, err := c.psrpPool.GetHandshakeFragments()
-	if err != nil {
-		return fmt.Errorf("get handshake fragments: %w", err)
+	switch c.config.Transport {
+	case TransportHvSocket:
+		// Convert VMID
+		vmID, _ := uuid.Parse(c.config.VMID) // Validated in New/Validate but parse again or store in Client?
+		// New was creating Client. Config has string.
+		// We'll parse again.
+
+		c.backend = powershell.NewHvSocketBackend(
+			vmID,
+			c.config.Domain,
+			c.config.Username,
+			c.config.Password,
+			c.config.ConfigurationName,
+			c.poolID,
+		)
+	default: // WSMan
+		// Ensure wsman client is set (it should be from New)
+		if c.wsman == nil {
+			return fmt.Errorf("wsman client not initialized")
+		}
+		c.backend = powershell.NewWSManBackend(c.wsman, powershell.NewWSManTransport(nil, "", ""))
 	}
-	creationXML := base64.StdEncoding.EncodeToString(frags)
 
-	// 2. Create WSMan shell with creationXml
-	// This performs the PSRP handshake (SessionCapability + InitRunspacePool)
-	c.pool = powershell.NewRunspacePool(c.wsman)
-	if err := c.pool.Open(ctx, creationXML); err != nil {
-		return fmt.Errorf("open wsman shell: %w", err)
+	// 2. Connect Backend (Prepare Transport)
+	if err := c.backend.Connect(ctx); err != nil {
+		return fmt.Errorf("connect backend: %w", err)
 	}
 
-	// 3. Open the PSRP pool
-	c.psrpPool.SkipHandshakeSend = true
-	if err := c.psrpPool.Open(ctx); err != nil {
-		_ = c.pool.Close(ctx)
-		return fmt.Errorf("open psrp pool: %w", err)
+	// 3. Get Transport
+	transport, ok := c.backend.Transport().(io.ReadWriter)
+	if !ok {
+		return fmt.Errorf("backend transport does not implement io.ReadWriter")
+	}
+
+	// Set Context on transport if it supports it (WSManTransport does)
+	// We need type assertion
+	if t, ok := transport.(*powershell.WSManTransport); ok {
+		t.SetContext(ctx)
+	}
+
+	// 4. Create PSRP Pool
+	// We use the ID we generated earlier
+	c.psrpPool = runspace.New(transport, c.poolID)
+
+	// 5. Init Backend
+	if err := c.backend.Init(ctx, c.psrpPool); err != nil {
+		return fmt.Errorf("init backend: %w", err)
 	}
 
 	// 4. Drain Shell Output (RunspacePoolState) to ensure pool is ready
@@ -268,7 +368,11 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	// Perform one Receive on the Shell (empty command ID)
 	// Drain result is discarded - we just need to consume the state message
-	_, _ = c.wsman.Receive(drainCtx, c.pool.ShellID(), "")
+	// Note: We need the ShellID from the backend
+	// TODO: Add ShellID() to RunspaceBackend interface? Yes, we did.
+	if c.backend.ShellID() != "" {
+		_, _ = c.wsman.Receive(drainCtx, c.backend.ShellID(), "")
+	}
 
 	c.connected = true
 
@@ -289,9 +393,15 @@ func (c *Client) Close(ctx context.Context) error {
 
 	c.closed = true
 
-	if c.pool != nil && c.connected {
-		if err := c.pool.Close(ctx); err != nil {
-			return fmt.Errorf("close runspace pool: %w", err)
+	// First close the runspace pool (sends RUNSPACEPOOL_STATE=Closed message)
+	if c.psrpPool != nil {
+		_ = c.psrpPool.Close(ctx)
+	}
+
+	// Then close the backend (sends transport-level Close and closes connection)
+	if c.backend != nil && c.connected {
+		if err := c.backend.Close(ctx); err != nil {
+			return fmt.Errorf("close backend: %w", err)
 		}
 	}
 
@@ -350,13 +460,9 @@ func (c *Client) Execute(ctx context.Context, script string) (*Result, error) {
 		return nil, errors.New("client is closed")
 	}
 	psrpPool := c.psrpPool
-	pool := c.pool
-	wsman := c.wsman
+	backend := c.backend
 	c.mu.Unlock()
 
-	// Create a go-psrpcore pipeline for this execution
-	// Mimic pypsrp behavior: wrap command in Invoke-Expression and pipe to Out-String
-	// This ensures output formatting and execution context match the working client
 	// Create a go-psrpcore pipeline for this execution
 	// We use the simple CreatePipeline which defaults to IsScript=true
 	// This generates <Cmd>script</Cmd><IsScript>true</IsScript>
@@ -365,35 +471,30 @@ func (c *Client) Execute(ctx context.Context, script string) (*Result, error) {
 		return nil, fmt.Errorf("create pipeline: %w", err)
 	}
 
-	// Get the CreatePipeline fragment data to embed in WSMan Command Arguments
-	// This is the key difference from before - pypsrp sends CreatePipeline in Command Args
-	// We use the new GetCreatePipelineDataWithID to ensure ObjectID continuity.
-	// We use the new GetCreatePipelineDataWithID to ensure ObjectID continuity.
+	// Get the CreatePipeline fragment data (base64) for WSMan encapsulation
+	// Note: client maintains c.messageID sequence
+	c.mu.Lock()
 	c.messageID++
-	createPipelineData, err := psrpPipeline.GetCreatePipelineDataWithID(c.messageID)
+	msgID := c.messageID
+	c.mu.Unlock()
+
+	createPipelineData, err := psrpPipeline.GetCreatePipelineDataWithID(msgID)
 	if err != nil {
 		return nil, fmt.Errorf("get create pipeline data: %w", err)
 	}
+	payload := base64.StdEncoding.EncodeToString(createPipelineData)
 
-	// Create WSMan Command with:
-	// - CommandID = go-psrpcore Pipeline ID (so response routing works)
-	// - Arguments = CreatePipeline fragment (base64 encoded)
-	pipelineID := strings.ToUpper(psrpPipeline.ID().String())
-	payloadB64 := base64.StdEncoding.EncodeToString(createPipelineData)
-
-	wsmanPipeline, err := pool.CreatePipelineWithArgs(ctx, pipelineID, payloadB64)
+	// Prepare the pipeline via the backend
+	// This handles WSMan command creation + transport config
+	// Or just returns for HvSocket
+	cleanup, err := backend.PreparePipeline(ctx, psrpPipeline, payload)
 	if err != nil {
-		return nil, fmt.Errorf("create wsman command: %w", err)
+		return nil, fmt.Errorf("prepare pipeline: %w", err)
 	}
-	defer wsmanPipeline.Close(ctx) // Clean up WSMan command when done
+	defer cleanup()
 
-	// Configure the transport for this specific command
-	c.psrpTransport.Configure(wsman, pool.ShellID(), wsmanPipeline.CommandID())
-
-	// Tell the pipeline to skip sending CreatePipeline - it was already sent in Command Args
-	psrpPipeline.SkipInvokeSend()
-
-	// Invoke the pipeline (this now just transitions state, no network send)
+	// Invoke the pipeline (transitions PSRP state)
+	// For WSMan, skip logic was handled in PreparePipeline
 	if err := psrpPipeline.Invoke(ctx); err != nil {
 		return nil, fmt.Errorf("invoke pipeline: %w", err)
 	}
