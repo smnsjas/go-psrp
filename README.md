@@ -4,7 +4,7 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/smnsjas/go-psrp)](https://goreportcard.com/report/github.com/smnsjas/go-psrp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Complete PowerShell Remoting Protocol implementation for Go with WSMan/WinRM transport.
+Complete PowerShell Remoting Protocol implementation for Go with multiple transport layers.
 
 ## Overview
 
@@ -27,6 +27,9 @@ This library builds on [go-psrpcore](https://github.com/smnsjas/go-psrpcore) by 
 │  ┌─────────────────────────────────────────────────┐   │
 │  │  wsman/        WSMan/WinRM transport            │   │
 │  └─────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────┐   │
+│  │  hvsock/       Hyper-V Socket (PowerShell Direct)│   │
+│  └─────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────┘
                           │
                           ▼
@@ -38,8 +41,13 @@ This library builds on [go-psrpcore](https://github.com/smnsjas/go-psrpcore) by 
 
 ## Features
 
-- 🔌 **WSMan/WinRM Transport** - HTTP/HTTPS with SOAP
-- 🔐 **Authentication** - Basic, NTLM, and Kerberos (Active Directory)
+- 🔌 **Multiple Transports**
+  - **WSMan/WinRM** - HTTP/HTTPS with SOAP (standard remote PowerShell)
+  - **HVSocket** - PowerShell Direct to Hyper-V VMs (Windows only)
+- 🔐 **Authentication**
+  - Basic, NTLM (explicit credentials)
+  - Kerberos (pure Go via gokrb5, cross-platform)
+  - Windows SSPI (native Negotiate/Kerberos on Windows)
 - 📦 **Full PSRP Support** - RunspacePools, Pipelines, Output streams
 - 🚀 **High-Level API** - Simple command execution
 - 🛡️ **Secure** - TLS 1.2+ by default, pure Go implementation
@@ -52,7 +60,7 @@ go get github.com/smnsjas/go-psrp
 
 ## Quick Start
 
-### Basic Usage
+### Basic Usage (WSMan)
 
 ```go
 package main
@@ -94,54 +102,71 @@ func main() {
         log.Fatal(err)
     }
 
-    fmt.Printf("Output: %s\n", string(result.Output))
-    if result.HadErrors {
-        fmt.Printf("Errors: %s\n", string(result.Errors))
+    for _, obj := range result.Output {
+        fmt.Printf("%+v\n", obj)
     }
 }
+```
+
+### PowerShell Direct (HVSocket) - Windows Only
+
+Connect directly to a Hyper-V VM without network configuration:
+
+```go
+cfg := client.DefaultConfig()
+cfg.Transport = client.TransportHvSocket
+cfg.VMID = "12345678-1234-1234-1234-123456789abc" // VM GUID
+cfg.Username = "administrator"
+cfg.Password = "vmpassword"
+cfg.Domain = "."  // "." for local accounts
+
+c, err := client.New("", cfg)  // Server not needed for HVSocket
 ```
 
 ### Using NTLM Authentication
 
 ```go
 cfg := client.DefaultConfig()
-cfg.Username = "domain\\user"
+cfg.Username = "DOMAIN\\user"  // Note: DOMAIN\user format
 cfg.Password = "password"
 cfg.AuthType = client.AuthNTLM
-```
-
-### Using Kerberos Authentication (Active Directory)
-
-```go
-cfg := client.DefaultConfig()
-cfg.Username = "user@REALM"
-cfg.Password = "password"
-cfg.AuthType = client.AuthKerberos
-cfg.Realm = "WIN.DOMAIN.COM"
-cfg.Krb5ConfPath = "/etc/krb5.conf" // Optional, defaults to /etc/krb5.conf
 cfg.UseTLS = true
 cfg.Port = 5986
 ```
 
-For SSO (using pre-existing Kerberos tickets from `kinit`):
+### Using Kerberos Authentication (Cross-Platform)
 
 ```go
 cfg := client.DefaultConfig()
-cfg.Username = "user@REALM"
+cfg.Username = "user"
+cfg.Password = "password"
 cfg.AuthType = client.AuthKerberos
 cfg.Realm = "WIN.DOMAIN.COM"
-cfg.CCachePath = "/tmp/krb5cc_1000" // Or set KRB5CCNAME env var
+cfg.Krb5ConfPath = "/etc/krb5.conf"
+cfg.UseTLS = true
+cfg.Port = 5986
+```
+
+With pre-existing Kerberos tickets (`kinit`):
+
+```go
+cfg := client.DefaultConfig()
+cfg.AuthType = client.AuthKerberos
+cfg.Realm = "WIN.DOMAIN.COM"
+cfg.CCachePath = "/tmp/krb5cc_1000" // Or use KRB5CCNAME env var
 cfg.UseTLS = true
 ```
 
-### HTTP (Non-TLS) Connection
+### Windows SSPI (Native Negotiate)
+
+On Windows, the client can use the system's Negotiate provider:
 
 ```go
 cfg := client.DefaultConfig()
-cfg.Username = "administrator"
+cfg.Username = "DOMAIN\\user"
 cfg.Password = "password"
-cfg.UseTLS = false
-cfg.Port = 5985 // Default HTTP port
+cfg.AuthType = client.AuthNegotiate  // Uses Windows SSPI on Windows
+cfg.UseTLS = true
 ```
 
 ## CLI Tool
@@ -152,42 +177,52 @@ A command-line tool is included for testing and quick scripts:
 # Build the CLI
 go build ./cmd/psrp-client
 
-# Run a command
-./psrp-client -server myserver -user admin -pass secret \
+# WSMan with NTLM
+./psrp-client -server myserver -user "DOMAIN\\admin" -tls -ntlm \
     -script "Get-Process | Select-Object -First 5"
 
-# With HTTPS and NTLM
-./psrp-client -server myserver -user domain\\admin -pass secret \
-    -tls -ntlm -script "Get-Service"
+# WSMan with Kerberos (using credential cache)
+./psrp-client -server myserver -user testuser -realm WIN.DOMAIN.COM \
+    -ccache /tmp/krb5cc_501 -tls -insecure \
+    -script "Get-Service"
+
+# PowerShell Direct (HVSocket) - Windows only
+./psrp-client -hvsocket -vmid "12345678-..." -user admin -domain "." \
+    -script "Get-Process"
 ```
 
 ### CLI Flags
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `-server` | WinRM server hostname | (required) |
+| `-server` | WinRM server hostname | (required for WSMan) |
 | `-user` | Username | (required) |
-| `-pass` | Password | (required unless using ccache) |
+| `-pass` | Password (or use `PSRP_PASSWORD` env) | - |
 | `-script` | PowerShell script to execute | `Get-Process` |
 | `-tls` | Use HTTPS | `false` |
-| `-port` | WinRM port | 5985 (HTTP), 5986 (HTTPS) |
-| `-ntlm` | Use NTLM auth | `false` (Basic) |
+| `-port` | WinRM port | 5985/5986 |
+| `-ntlm` | Use NTLM auth | `false` |
 | `-kerberos` | Use Kerberos auth | `false` |
-| `-realm` | Kerberos realm (e.g., WIN.DOMAIN.COM) | (auto-detect) |
+| `-realm` | Kerberos realm | - |
 | `-krb5conf` | Path to krb5.conf | `/etc/krb5.conf` |
-| `-ccache` | Path to Kerberos credential cache | `$KRB5CCNAME` |
+| `-ccache` | Kerberos credential cache | `$KRB5CCNAME` |
 | `-insecure` | Skip TLS verification | `false` |
 | `-timeout` | Operation timeout | `60s` |
+| `-hvsocket` | Use HVSocket transport | `false` |
+| `-vmid` | VM GUID for HVSocket | - |
+| `-domain` | Domain for HVSocket auth | `.` |
+| `-configname` | PowerShell configuration name | - |
 
 ## Package Structure
 
 | Package | Description |
 |---------|-------------|
 | `client` | High-level API: `New()`, `Connect()`, `Execute()`, `Close()` |
-| `powershell` | PSRP bridge, `RunspacePool`, `Pipeline`, `WSManTransport` |
+| `powershell` | PSRP bridge, `WSManBackend`, `HvSocketBackend` |
 | `wsman` | WSMan client, SOAP envelope builder, operations |
-| `wsman/auth` | Authentication: `BasicAuth`, `NTLMAuth`, `NegotiateAuth` (Kerberos) |
+| `wsman/auth` | Authentication: `BasicAuth`, `NTLMAuth`, `NegotiateAuth`, `PureKerberosProvider` |
 | `wsman/transport` | HTTP/TLS transport layer |
+| `hvsock` | Hyper-V Socket connectivity (Windows only) |
 
 ## Configuration
 
@@ -225,7 +260,9 @@ if err != nil {
 
 if result.HadErrors {
     // PowerShell errors (non-terminating)
-    fmt.Printf("PowerShell Error: %s\n", string(result.Errors))
+    for _, e := range result.Errors {
+        fmt.Printf("PowerShell Error: %v\n", e)
+    }
 }
 ```
 
