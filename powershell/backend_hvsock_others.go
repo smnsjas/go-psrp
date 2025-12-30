@@ -1,5 +1,6 @@
 //go:build !windows
 
+// Package powershell provides PowerShell remoting via WSMan and HVSocket transports.
 package powershell
 
 import (
@@ -12,33 +13,42 @@ import (
 	"github.com/smnsjas/go-psrpcore/runspace"
 )
 
+// HvSocketBackend is a stub for non-Windows platforms.
 type HvSocketBackend struct{}
 
-// NewHvSocketBackend creates a stub backend.
-func NewHvSocketBackend(vmID uuid.UUID, domain, username, password, configName string, poolID uuid.UUID) *HvSocketBackend {
+// NewHvSocketBackend creates a stub backend for non-Windows platforms.
+func NewHvSocketBackend(_ uuid.UUID, _, _, _, _ string, _ uuid.UUID) *HvSocketBackend {
 	return &HvSocketBackend{}
 }
 
-func (b *HvSocketBackend) Connect(ctx context.Context) error {
+// Connect returns an error on non-Windows platforms.
+func (b *HvSocketBackend) Connect(_ context.Context) error {
 	return errors.New("hvsock is only supported on windows")
 }
 
+// Transport returns nil on non-Windows platforms.
 func (b *HvSocketBackend) Transport() io.ReadWriter {
 	return nil
 }
 
-func (b *HvSocketBackend) Init(ctx context.Context, pool *runspace.Pool) error {
+// Init returns an error on non-Windows platforms.
+func (b *HvSocketBackend) Init(_ context.Context, _ *runspace.Pool) error {
 	return errors.New("hvsock is only supported on windows")
 }
 
-func (b *HvSocketBackend) PreparePipeline(ctx context.Context, p *pipeline.Pipeline, payload string) (func(), error) {
+// PreparePipeline returns an error on non-Windows platforms.
+func (b *HvSocketBackend) PreparePipeline(
+	_ context.Context, _ *pipeline.Pipeline, _ string,
+) (func(), error) {
 	return nil, errors.New("hvsock is only supported on windows")
 }
 
-func (b *HvSocketBackend) Close(ctx context.Context) error {
+// Close is a no-op on non-Windows platforms.
+func (b *HvSocketBackend) Close(_ context.Context) error {
 	return nil
 }
 
+// ShellID returns empty string on non-Windows platforms.
 func (b *HvSocketBackend) ShellID() string {
 	return ""
 }

@@ -76,7 +76,8 @@ func main() {
 	// Validate flags
 	// Username is required unless the platform supports SSO (e.g. Windows)
 	if *username == "" && !auth.SupportsSSO() {
-		fmt.Fprintln(os.Stderr, "Error: -user is required (SSO not supported on this platform without explicit credentials checks)")
+		fmt.Fprintln(os.Stderr,
+			"Error: -user is required (SSO not supported on this platform)")
 		flag.Usage()
 		os.Exit(1)
 	}

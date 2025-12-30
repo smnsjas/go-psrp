@@ -60,7 +60,7 @@ func (b *WSManBackend) ShellID() string {
 }
 
 // Connect implements RunspaceBackend. For WSMan, the transport is already set up.
-func (b *WSManBackend) Connect(ctx context.Context) error {
+func (b *WSManBackend) Connect(_ context.Context) error {
 	return nil
 }
 
