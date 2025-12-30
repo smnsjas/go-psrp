@@ -42,7 +42,8 @@ func (t *basicTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// Warn if using Basic auth over non-HTTPS (credentials are easily readable)
 	if req.URL.Scheme != "https" {
 		t.warnOnce.Do(func() {
-			log.Printf("WARNING: Basic authentication over non-HTTPS connection to %s - credentials are not encrypted", req.URL.Host)
+			log.Printf("WARNING: Basic auth over non-HTTPS to %s - credentials not encrypted",
+				req.URL.Host)
 		})
 	}
 

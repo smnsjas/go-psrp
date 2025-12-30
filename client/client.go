@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"io"
 	"sync"
 	"time"
 
@@ -339,10 +338,7 @@ func (c *Client) Connect(ctx context.Context) error {
 	}
 
 	// 3. Get Transport
-	transport, ok := c.backend.Transport().(io.ReadWriter)
-	if !ok {
-		return fmt.Errorf("backend transport does not implement io.ReadWriter")
-	}
+	transport := c.backend.Transport()
 
 	// Set Context on transport if it supports it (WSManTransport does)
 	// We need type assertion
