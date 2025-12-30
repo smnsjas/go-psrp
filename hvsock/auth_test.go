@@ -1,3 +1,5 @@
+//go:build windows
+
 package hvsock
 
 import (

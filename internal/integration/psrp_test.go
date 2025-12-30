@@ -28,12 +28,16 @@ type MockPSRPTransport struct {
 
 	// Fragment counter for responses
 	objectID uint64
+
+	// Closed channel - closed when transport is shut down
+	closedCh chan struct{}
 }
 
 // NewMockPSRPTransport creates a mock transport with proper response handling.
 func NewMockPSRPTransport(poolID uuid.UUID) *MockPSRPTransport {
 	return &MockPSRPTransport{
-		poolID: poolID,
+		poolID:   poolID,
+		closedCh: make(chan struct{}),
 	}
 }
 
@@ -61,15 +65,35 @@ func (m *MockPSRPTransport) Write(p []byte) (int, error) {
 }
 
 // Read returns mock PSRP responses.
+// Blocks if no data available until transport is closed.
 func (m *MockPSRPTransport) Read(p []byte) (int, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	for {
+		m.mu.Lock()
+		if m.readBuf.Len() > 0 {
+			n, err := m.readBuf.Read(p)
+			m.mu.Unlock()
+			return n, err
+		}
+		m.mu.Unlock()
 
-	if m.readBuf.Len() == 0 {
-		return 0, io.EOF
+		// Wait for data or close
+		select {
+		case <-m.closedCh:
+			return 0, io.EOF
+		case <-time.After(10 * time.Millisecond):
+			// Poll again
+		}
 	}
+}
 
-	return m.readBuf.Read(p)
+// Close shuts down the mock transport.
+func (m *MockPSRPTransport) Close() {
+	select {
+	case <-m.closedCh:
+		// Already closed
+	default:
+		close(m.closedCh)
+	}
 }
 
 // generateResponse creates appropriate PSRP responses based on the request.
@@ -241,6 +265,12 @@ func TestPSRPCore_PoolOpenClose(t *testing.T) {
 	if err != nil {
 		t.Errorf("Close failed: %v", err)
 	}
+
+	// Close the mock transport to allow dispatch loop to exit cleanly
+	transport.Close()
+
+	// Give cleanup a moment to complete
+	time.Sleep(50 * time.Millisecond)
 
 	if pool.State() != runspace.StateClosed {
 		t.Errorf("State = %v, want StateClosed", pool.State())

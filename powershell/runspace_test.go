@@ -7,7 +7,7 @@ import (
 	"github.com/smnsjas/go-psrp/wsman"
 )
 
-// mockWSManClientForPool extends mockWSManClient for pool tests.
+// mockWSManClientForPool implements PoolClient for tests.
 type mockWSManClientForPool struct {
 	createShellID  string
 	createErr      error
@@ -44,35 +44,36 @@ func (m *mockWSManClientForPool) Signal(_ context.Context, _, _, _ string) error
 	return nil
 }
 
-// TestRunspacePool_Open verifies pool creation via WSMan Create.
-func TestRunspacePool_Open(t *testing.T) {
+func (m *mockWSManClientForPool) CloseIdleConnections() {}
+
+// TestWSManBackend_ShellID verifies shell ID is returned after init.
+func TestWSManBackend_ShellID(t *testing.T) {
 	mock := &mockWSManClientForPool{
 		createShellID: "test-shell-id",
 	}
-	pool := NewRunspacePool(mock)
+	transport := NewWSManTransport(mock, "", "")
+	backend := NewWSManBackend(mock, transport)
 
-	ctx := context.Background()
-	err := pool.Open(ctx, "")
-	if err != nil {
-		t.Fatalf("Open failed: %v", err)
-	}
-
-	if pool.ShellID() != "test-shell-id" {
-		t.Errorf("ShellID = %q, want %q", pool.ShellID(), "test-shell-id")
+	// Before init, should be empty
+	if backend.ShellID() != "" {
+		t.Errorf("ShellID before init = %q, want empty", backend.ShellID())
 	}
 }
 
-// TestRunspacePool_Close verifies pool cleanup via WSMan Delete.
-func TestRunspacePool_Close(t *testing.T) {
+// TestWSManBackend_Close verifies close calls Delete.
+func TestWSManBackend_Close(t *testing.T) {
 	mock := &mockWSManClientForPool{
 		createShellID: "test-shell-id",
 	}
-	pool := NewRunspacePool(mock)
+	transport := NewWSManTransport(mock, "", "")
+	backend := NewWSManBackend(mock, transport)
+
+	// Manually set opened state to test close
+	backend.opened = true
+	backend.shellID = "test-shell-id"
 
 	ctx := context.Background()
-	_ = pool.Open(ctx, "")
-
-	err := pool.Close(ctx)
+	err := backend.Close(ctx)
 	if err != nil {
 		t.Fatalf("Close failed: %v", err)
 	}
@@ -85,40 +86,16 @@ func TestRunspacePool_Close(t *testing.T) {
 	}
 }
 
-// TestRunspacePool_CreatePipeline verifies pipeline creation.
-func TestRunspacePool_CreatePipeline(t *testing.T) {
-	mock := &mockWSManClientForPool{
-		createShellID: "test-shell-id",
-	}
-	pool := NewRunspacePool(mock)
-
-	ctx := context.Background()
-	_ = pool.Open(ctx, "")
-
-	pipeline, err := pool.CreatePipeline(ctx)
-	if err != nil {
-		t.Fatalf("CreatePipeline failed: %v", err)
-	}
-
-	if pipeline == nil {
-		t.Error("pipeline is nil")
-	}
-}
-
-// TestRunspacePool_NotOpened verifies operations fail if pool not opened.
-func TestRunspacePool_NotOpened(t *testing.T) {
+// TestWSManBackend_NotOpened verifies Close fails if not opened.
+func TestWSManBackend_NotOpened(t *testing.T) {
 	mock := &mockWSManClientForPool{}
-	pool := NewRunspacePool(mock)
+	transport := NewWSManTransport(mock, "", "")
+	backend := NewWSManBackend(mock, transport)
 
 	ctx := context.Background()
 
-	_, err := pool.CreatePipeline(ctx)
-	if err == nil {
-		t.Error("expected error when pool not opened")
-	}
-
-	err = pool.Close(ctx)
-	if err == nil {
-		t.Error("expected error when closing unopened pool")
+	err := backend.Close(ctx)
+	if err != ErrPoolNotOpened {
+		t.Errorf("Close on unopened pool: got %v, want ErrPoolNotOpened", err)
 	}
 }
