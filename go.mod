@@ -11,7 +11,7 @@ require (
 	github.com/Microsoft/go-winio v0.6.2
 	github.com/alexbrainman/sspi v0.0.0-20250919150558-7d374ff0d59e
 	github.com/go-krb5/krb5 v0.0.0-20251226122733-d0288459fc25
-	github.com/smnsjas/go-psrpcore v0.0.0-20251230182554-3cf12d24bdfc
+	github.com/smnsjas/go-psrpcore v0.0.0-20251230190552-63d922dacbb3
 	golang.org/x/term v0.38.0
 )
 
