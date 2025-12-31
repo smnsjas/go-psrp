@@ -89,15 +89,20 @@ type Config struct {
 
 	// ConfigurationName is the PowerShell configuration name (Optional, for HvSocket).
 	ConfigurationName string
+
+	// MaxConcurrentCommands limits the number of concurrent pipeline executions.
+	// Default: 5. Set to 1 to disable concurrent execution.
+	MaxConcurrentCommands int
 }
 
 // DefaultConfig returns a Config with sensible defaults.
 func DefaultConfig() Config {
 	return Config{
-		Port:     5985,
-		UseTLS:   false,
-		Timeout:  60 * time.Second,
-		AuthType: AuthNegotiate, // Kerberos preferred, NTLM fallback
+		Port:                  5985,
+		UseTLS:                false,
+		Timeout:               60 * time.Second,
+		AuthType:              AuthNegotiate, // Kerberos preferred, NTLM fallback
+		MaxConcurrentCommands: 5,             // Allow 5 concurrent commands
 	}
 }
 
@@ -139,6 +144,9 @@ type Client struct {
 	connected bool
 	closed    bool
 	messageID uint64 // Tracks PSRP message ObjectID sequence
+
+	// Concurrency control
+	semaphore chan struct{} // Limits concurrent command execution
 }
 
 // New creates a new PSRP client.
@@ -375,6 +383,13 @@ func (c *Client) Connect(ctx context.Context) error {
 	// Initialize messageID counter.
 	c.messageID = 2
 
+	// Initialize semaphore for concurrent command limiting
+	maxConcurrent := c.config.MaxConcurrentCommands
+	if maxConcurrent <= 0 {
+		maxConcurrent = 5 // Default
+	}
+	c.semaphore = make(chan struct{}, maxConcurrent)
+
 	return nil
 }
 
@@ -457,7 +472,17 @@ func (c *Client) Execute(ctx context.Context, script string) (*Result, error) {
 	}
 	psrpPool := c.psrpPool
 	backend := c.backend
+	semaphore := c.semaphore
 	c.mu.Unlock()
+
+	// Acquire semaphore (limit concurrent commands)
+	select {
+	case semaphore <- struct{}{}:
+		// Acquired
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	defer func() { <-semaphore }() // Release on exit
 
 	// Create a go-psrpcore pipeline for this execution
 	// We use the simple CreatePipeline which defaults to IsScript=true
