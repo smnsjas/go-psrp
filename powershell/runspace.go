@@ -128,16 +128,16 @@ func (b *WSManBackend) Close(ctx context.Context) error {
 	return nil
 }
 
-// PreparePipeline creates the WSMan command and configures the transport.
-func (b *WSManBackend) PreparePipeline(ctx context.Context, p *pipeline.Pipeline, payload string) (func(), error) {
+// PreparePipeline creates the WSMan command and returns a per-pipeline transport.
+func (b *WSManBackend) PreparePipeline(ctx context.Context, p *pipeline.Pipeline, payload string) (io.Reader, func(), error) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
 	if !b.opened {
-		return nil, ErrPoolNotOpened
+		return nil, nil, ErrPoolNotOpened
 	}
 	if b.closed {
-		return nil, ErrPoolClosed
+		return nil, nil, ErrPoolClosed
 	}
 
 	// 1. Create WSMan Command (Pipeline)
@@ -146,21 +146,18 @@ func (b *WSManBackend) PreparePipeline(ctx context.Context, p *pipeline.Pipeline
 
 	returnedID, err := b.client.Command(ctx, b.shellID, pipelineID, payload)
 	if err != nil {
-		return nil, fmt.Errorf("create wsman command: %w", err)
+		return nil, nil, fmt.Errorf("create wsman command: %w", err)
 	}
 
-	// 2. Configure the transport for this pipeline
-	// This tells the transport that any writes for this pipeline ID should go to this command ID
-	b.transport.Configure(b.client, b.shellID, returnedID)
+	// 2. Create a per-pipeline transport for receiving
+	// Each pipeline gets its own transport with its specific commandID
+	// This allows concurrent pipelines to receive independently
+	pipelineTransport := NewWSManTransport(b.client, b.shellID, returnedID)
+	pipelineTransport.SetContext(ctx)
 
 	// 3. Setup cleanup function
 	cleanup := func() {
 		// Terminate the command on WSMan side
-		// Use a detached context in case the original context is cancelled?
-		// For now, use a background context or the passed context if available?
-		// The cleanup is called after pipeline wait, so we often want a fresh context.
-		// However, we don't have one here.
-		// We'll create a new context with timeout for cleanup.
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = b.client.Signal(ctx, b.shellID, returnedID, SignalTerminate)
@@ -171,5 +168,5 @@ func (b *WSManBackend) PreparePipeline(ctx context.Context, p *pipeline.Pipeline
 	// we must tell go-psrpcore NOT to send it again over the transport.
 	p.SkipInvokeSend()
 
-	return cleanup, nil
+	return pipelineTransport, cleanup, nil
 }

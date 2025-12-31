@@ -6,6 +6,9 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,6 +18,7 @@ import (
 	"github.com/smnsjas/go-psrp/wsman/auth"
 	"github.com/smnsjas/go-psrp/wsman/transport"
 	"github.com/smnsjas/go-psrpcore/messages"
+	"github.com/smnsjas/go-psrpcore/pipeline"
 	"github.com/smnsjas/go-psrpcore/runspace"
 	"github.com/smnsjas/go-psrpcore/serialization"
 )
@@ -147,6 +151,7 @@ type Client struct {
 
 	// Concurrency control
 	semaphore chan struct{} // Limits concurrent command execution
+	cmdMu     sync.Mutex    // Serializes command creation (NTLM auth requires this)
 }
 
 // New creates a new PSRP client.
@@ -358,6 +363,21 @@ func (c *Client) Connect(ctx context.Context) error {
 	// We use the ID we generated earlier
 	c.psrpPool = runspace.New(transport, c.poolID)
 
+	// Enable debug logging if PSRP_DEBUG is set
+	if os.Getenv("PSRP_DEBUG") != "" {
+		c.psrpPool.EnableDebugLogging()
+	}
+
+	// Configure pool size for concurrent execution
+	// Per MS-PSRP spec, each runspace can only execute one pipeline at a time.
+	// To run multiple pipelines concurrently, we need a pool with multiple runspaces.
+	maxRunspaces := c.config.MaxConcurrentCommands
+	if maxRunspaces <= 0 {
+		maxRunspaces = 5
+	}
+	_ = c.psrpPool.SetMinRunspaces(1)
+	_ = c.psrpPool.SetMaxRunspaces(maxRunspaces)
+
 	// 5. Init Backend
 	if err := c.backend.Init(ctx, c.psrpPool); err != nil {
 		return fmt.Errorf("init backend: %w", err)
@@ -381,7 +401,10 @@ func (c *Client) Connect(ctx context.Context) error {
 	c.connected = true
 
 	// Initialize messageID counter.
+	// WSMan Shell creation sends messages 1 (SESSION_CAPABILITY) and 2 (INIT_RUNSPACEPOOL)
+	// via creationXml. We sync the pool's fragmenter so subsequent messages start at 3.
 	c.messageID = 2
+	c.psrpPool.SetMessageID(2)
 
 	// Initialize semaphore for concurrent command limiting
 	maxConcurrent := c.config.MaxConcurrentCommands
@@ -505,25 +528,54 @@ func (c *Client) Execute(ctx context.Context, script string) (*Result, error) {
 	}
 	payload := base64.StdEncoding.EncodeToString(createPipelineData)
 
-	// Prepare the pipeline via the backend
-	// This handles WSMan command creation + transport config
-	// Or just returns for HvSocket
-	cleanup, err := backend.PreparePipeline(ctx, psrpPipeline, payload)
+	// Serialize command creation - NTLM auth requires one request at a time
+	// to properly establish the authentication on the connection.
+	// Retry loop handles transient NTLM 401 errors under load.
+	var pipelineTransport io.Reader
+	var cleanup func()
+
+	c.cmdMu.Lock()
+	// retries for NTLM 401 measurement
+	for i := 0; i < 3; i++ {
+		pipelineTransport, cleanup, err = backend.PreparePipeline(ctx, psrpPipeline, payload)
+		if err != nil {
+			if strings.Contains(err.Error(), "401 Unauthorized") {
+				// NTLM negotiation race, retry
+				continue
+			}
+			c.cmdMu.Unlock()
+			return nil, fmt.Errorf("prepare pipeline: %w", err)
+		}
+
+		// Invoke the pipeline (transitions PSRP state)
+		if err = psrpPipeline.Invoke(ctx); err != nil {
+			cleanup()
+			if strings.Contains(err.Error(), "401 Unauthorized") {
+				continue
+			}
+			c.cmdMu.Unlock()
+			return nil, fmt.Errorf("invoke pipeline: %w", err)
+		}
+
+		// Success
+		break
+	}
+	c.cmdMu.Unlock()
+
 	if err != nil {
-		return nil, fmt.Errorf("prepare pipeline: %w", err)
+		return nil, fmt.Errorf("failed to create/invoke pipeline after retries: %w", err)
 	}
 	defer cleanup()
 
-	// Invoke the pipeline (transitions PSRP state)
-	// For WSMan, skip logic was handled in PreparePipeline
-	if err := psrpPipeline.Invoke(ctx); err != nil {
-		return nil, fmt.Errorf("invoke pipeline: %w", err)
+	// Start per-pipeline receive loop (for WSMan) or global dispatch loop (for HvSocket)
+	// WSMan requires per-pipeline receive with commandID, while HvSocket uses shared adapter
+	if pipelineTransport != nil {
+		// Per-pipeline receive loop for WSMan
+		go c.runPipelineReceive(ctx, pipelineTransport, psrpPipeline)
+	} else {
+		// Fall back to global dispatch loop for HvSocket
+		psrpPool.StartDispatchLoop()
 	}
-
-	// Start the dispatch loop FIRST - WinRM Receive is a long-poll that must be
-	// waiting on the server when we send EOF. The server will respond to the
-	// waiting Receive request with the pipeline output after processing EOF.
-	psrpPool.StartDispatchLoop()
 
 	// Note: We do NOT call CloseInput() here because go-psrpcore sets
 	// <Obj N="NoInput">true</Obj> in the CreatePipeline message.
@@ -595,4 +647,69 @@ func (c *Client) Execute(ctx context.Context, script string) (*Result, error) {
 		Information: information,
 		HadErrors:   hadErrors,
 	}, nil
+}
+
+// runPipelineReceive runs a per-pipeline receive loop.
+// It reads PSRP fragments from the pipeline-specific transport and feeds them to the pipeline.
+// This is used by WSMan where each command has its own stdout stream.
+func (c *Client) runPipelineReceive(ctx context.Context, transport io.Reader, pl *pipeline.Pipeline) {
+	// Read PSRP fragments from the transport and feed them to the pipeline
+	// Fragment format: ObjectId (8 bytes) + FragmentId (8 bytes) + Flags (1 byte) + BlobLength (4 bytes) + Blob
+	for {
+		// Check if context cancelled or pipeline done
+		select {
+		case <-ctx.Done():
+			return
+		case <-pl.Done():
+			return
+		default:
+		}
+
+		// Read fragment header (21 bytes: ObjectId=8, FragmentId=8, Flags=1, BlobLength=4)
+		header := make([]byte, 21)
+		if _, err := io.ReadFull(transport, header); err != nil {
+			if err == io.EOF || ctx.Err() != nil {
+				return
+			}
+			// Transport error - fail the pipeline
+			pl.Fail(fmt.Errorf("read fragment header: %w", err))
+			return
+		}
+
+		// Parse blob length from last 4 bytes (big-endian)
+		blobLen := int(header[17])<<24 | int(header[18])<<16 | int(header[19])<<8 | int(header[20])
+
+		// Read blob data
+		var blob []byte
+		if blobLen > 0 {
+			blob = make([]byte, blobLen)
+			if _, err := io.ReadFull(transport, blob); err != nil {
+				pl.Fail(fmt.Errorf("read fragment blob: %w", err))
+				return
+			}
+		}
+
+		// Parse the PSRP message from the fragment
+		// Fragment flags: bit 0 = start, bit 1 = end
+		flags := header[16]
+		isStart := flags&0x01 != 0
+		isEnd := flags&0x02 != 0
+
+		// For now, assume single-fragment messages (most common case)
+		// TODO: Handle multi-fragment messages by accumulating blobs
+		if isStart && isEnd && len(blob) > 0 {
+			// Full message - parse and dispatch
+			msg, err := messages.Decode(blob)
+			if err != nil {
+				// Skip unparseable messages
+				continue
+			}
+
+			// Feed to pipeline via HandleMessage
+			if err := pl.HandleMessage(msg); err != nil {
+				// HandleMessage failed - pipeline might be done
+				return
+			}
+		}
+	}
 }

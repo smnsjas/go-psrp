@@ -211,6 +211,11 @@ func (c *Client) Receive(ctx context.Context, shellID, commandID string) (*Recei
 
 	respBody, err := c.sendEnvelope(ctx, env.WithBody(body))
 	if err != nil {
+		// If the operation timed out, it just means no data was available.
+		// We should return an empty result so the caller can poll again.
+		if strings.Contains(err.Error(), "w:TimedOut") || strings.Contains(err.Error(), "OperationTimeout") {
+			return &ReceiveResult{}, nil
+		}
 		return nil, fmt.Errorf("receive: %w", err)
 	}
 
