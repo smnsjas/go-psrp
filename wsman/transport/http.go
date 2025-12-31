@@ -79,12 +79,12 @@ func NewHTTPTransport(opts ...HTTPTransportOption) *HTTPTransport {
 				},
 				// NTLM requires persistent connections for the handshake
 				DisableKeepAlives: false,
-				// Increase connection limits for better NTLM session persistence
-				// We need at least 2 connections: one for Send (Command Input) and one for Receive (Output)
-				// Setting this too high can cause race conditions during NTLM handshake on new connections
-				MaxIdleConns:        10,
-				MaxIdleConnsPerHost: 2,
-				MaxConnsPerHost:     2,
+				// Increase connection limits for concurrent command execution
+				// Each concurrent command needs its own connection for NTLM auth
+				// Default: 10 connections to support MaxConcurrentCommands=5 with headroom
+				MaxIdleConns:        20,
+				MaxIdleConnsPerHost: 10,
+				MaxConnsPerHost:     10,
 				// Longer idle timeout for NTLM sessions
 				IdleConnTimeout: 90 * time.Second,
 			},

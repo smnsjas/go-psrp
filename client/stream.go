@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
+	"strings"
 
 	"github.com/smnsjas/go-psrpcore/messages"
 	"github.com/smnsjas/go-psrpcore/pipeline"
@@ -86,18 +88,47 @@ func (c *Client) ExecuteStream(ctx context.Context, script string) (*StreamResul
 	}
 	payload := base64.StdEncoding.EncodeToString(createPipelineData)
 
-	// Prepare pipeline via backend
-	cleanupBackend, err := backend.PreparePipeline(ctx, psrpPipeline, payload)
+	// Serialize command creation for NTLM compatibility
+	// Retry loop handles transient NTLM 401 errors under load.
+	var pipelineTransport io.Reader
+	var cleanupBackend func()
+
+	c.cmdMu.Lock()
+	for i := 0; i < 3; i++ {
+		pipelineTransport, cleanupBackend, err = backend.PreparePipeline(ctx, psrpPipeline, payload)
+		if err != nil {
+			if strings.Contains(err.Error(), "401 Unauthorized") {
+				continue
+			}
+			c.cmdMu.Unlock()
+			<-semaphore
+			return nil, fmt.Errorf("prepare pipeline: %w", err)
+		}
+
+		// Invoke pipeline
+		if err = psrpPipeline.Invoke(ctx); err != nil {
+			c.cmdMu.Unlock()
+			cleanupBackend()
+			if strings.Contains(err.Error(), "401 Unauthorized") {
+				continue
+			}
+			<-semaphore
+			return nil, fmt.Errorf("invoke pipeline: %w", err)
+		}
+		break
+	}
+	c.cmdMu.Unlock()
+
 	if err != nil {
 		<-semaphore
-		return nil, fmt.Errorf("prepare pipeline: %w", err)
+		return nil, fmt.Errorf("failed to create/invoke pipeline after retries: %w", err)
 	}
 
-	// Invoke pipeline
-	if err := psrpPipeline.Invoke(ctx); err != nil {
-		cleanupBackend()
-		<-semaphore
-		return nil, fmt.Errorf("invoke pipeline: %w", err)
+	// Start per-pipeline receive loop (for WSMan) or global dispatch loop (for HvSocket)
+	if pipelineTransport != nil {
+		go c.runPipelineReceive(ctx, pipelineTransport, psrpPipeline)
+	} else {
+		psrpPool.StartDispatchLoop()
 	}
 
 	// Close input for script execution

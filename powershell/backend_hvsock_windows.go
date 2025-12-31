@@ -117,9 +117,10 @@ func (b *HvSocketBackend) Init(ctx context.Context, pool *runspace.Pool) error {
 	return nil
 }
 
-func (b *HvSocketBackend) PreparePipeline(ctx context.Context, p *pipeline.Pipeline, payload string) (func(), error) {
-	// For HvSocket (OutOfProc), we don't need to do anything special here.
-	return func() {}, nil
+func (b *HvSocketBackend) PreparePipeline(ctx context.Context, p *pipeline.Pipeline, payload string) (io.Reader, func(), error) {
+	// For HvSocket (OutOfProc), we don't need a separate transport per pipeline.
+	// The shared adapter handles all pipelines. Return nil for the transport.
+	return nil, func() {}, nil
 }
 
 func (b *HvSocketBackend) Close(ctx context.Context) error {
