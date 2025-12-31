@@ -134,3 +134,43 @@ func TestClient_Close(t *testing.T) {
 		t.Errorf("Second Close failed: %v", err)
 	}
 }
+
+// TestDefaultConfig_MaxConcurrent verifies MaxConcurrentCommands default.
+func TestDefaultConfig_MaxConcurrent(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.MaxConcurrentCommands != 5 {
+		t.Errorf("MaxConcurrentCommands = %d, want 5", cfg.MaxConcurrentCommands)
+	}
+}
+
+// TestSemaphoreAcquireRelease tests semaphore behavior using channels directly.
+func TestSemaphoreAcquireRelease(t *testing.T) {
+	// Simulate semaphore with capacity 2
+	sem := make(chan struct{}, 2)
+
+	// Acquire 2 slots
+	sem <- struct{}{}
+	sem <- struct{}{}
+
+	// Try to acquire a third slot with timeout (should fail)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	select {
+	case sem <- struct{}{}:
+		t.Fatal("should not be able to acquire 3rd slot when capacity is 2")
+	case <-ctx.Done():
+		// Expected - semaphore is full
+	}
+
+	// Release one slot
+	<-sem
+
+	// Now we should be able to acquire
+	select {
+	case sem <- struct{}{}:
+		// Success
+	case <-time.After(50 * time.Millisecond):
+		t.Fatal("should be able to acquire after release")
+	}
+}
