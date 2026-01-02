@@ -17,22 +17,31 @@ type mockWSManClient struct {
 	receiveDone bool
 }
 
-func (m *mockWSManClient) Send(_ context.Context, _, _, _ string, data []byte) error {
+func (m *mockWSManClient) Send(_ context.Context, _ *wsman.EndpointReference, _, _ string, data []byte) error {
 	m.sendData = append(m.sendData, data...)
 	return nil
 }
 
-func (m *mockWSManClient) Receive(_ context.Context, _, _ string) (*wsman.ReceiveResult, error) {
+func (m *mockWSManClient) Receive(_ context.Context, _ *wsman.EndpointReference, _ string) (*wsman.ReceiveResult, error) {
 	return &wsman.ReceiveResult{
 		Stdout: m.receiveData,
 		Done:   m.receiveDone,
 	}, nil
 }
 
+func dummyEPR() *wsman.EndpointReference {
+	return &wsman.EndpointReference{
+		Address: "http://localhost:5985/wsman",
+		Selectors: []wsman.Selector{
+			{Name: "ShellId", Value: "test-shell-id"},
+		},
+	}
+}
+
 // TestAdapter_Write verifies data is sent via WSMan Send.
 func TestAdapter_Write(t *testing.T) {
 	mock := &mockWSManClient{}
-	adapter := NewAdapter(mock, "shell-id", "command-id")
+	adapter := NewAdapter(mock, dummyEPR(), "command-id")
 
 	data := []byte("test-psrp-fragment")
 	n, err := adapter.Write(data)
@@ -55,7 +64,7 @@ func TestAdapter_Read(t *testing.T) {
 		receiveData: []byte("response-data"),
 		receiveDone: false,
 	}
-	adapter := NewAdapter(mock, "shell-id", "command-id")
+	adapter := NewAdapter(mock, dummyEPR(), "command-id")
 
 	buf := make([]byte, 1024)
 	n, err := adapter.Read(buf)
@@ -78,7 +87,7 @@ func TestAdapter_Read_EOF(t *testing.T) {
 		receiveData: nil,
 		receiveDone: true,
 	}
-	adapter := NewAdapter(mock, "shell-id", "command-id")
+	adapter := NewAdapter(mock, dummyEPR(), "command-id")
 
 	buf := make([]byte, 1024)
 	_, err := adapter.Read(buf)
@@ -92,7 +101,7 @@ func TestAdapter_Read_BufferedData(t *testing.T) {
 	mock := &mockWSManClient{
 		receiveData: []byte("more-data"),
 	}
-	adapter := NewAdapter(mock, "shell-id", "command-id")
+	adapter := NewAdapter(mock, dummyEPR(), "command-id")
 
 	// First read should get initial data
 	buf := make([]byte, 5) // Smaller than response
@@ -121,7 +130,7 @@ func TestAdapter_Read_BufferedData(t *testing.T) {
 // TestAdapter_Context verifies context cancellation.
 func TestAdapter_Context(t *testing.T) {
 	mock := &mockWSManClient{}
-	adapter := NewAdapter(mock, "shell-id", "command-id")
+	adapter := NewAdapter(mock, dummyEPR(), "command-id")
 
 	// Cancel the context
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Millisecond)

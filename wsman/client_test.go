@@ -20,15 +20,22 @@ func TestClient_Create(t *testing.T) {
 		_, _ = r.Body.Read(body)
 		receivedBody = string(body)
 
-		// Return a mock Create response with ShellId
+		// Return a mock Create response with EndpointReference
 		response := `<?xml version="1.0" encoding="UTF-8"?>
 <s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
             xmlns:a="http://schemas.xmlsoap.org/ws/2004/08/addressing"
+            xmlns:w="http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd"
             xmlns:rsp="http://schemas.microsoft.com/wbem/wsman/1/windows/shell">
   <s:Body>
-    <rsp:Shell>
-      <rsp:ShellId>11111111-1111-1111-1111-111111111111</rsp:ShellId>
-    </rsp:Shell>
+    <w:ResourceCreated>
+      <a:Address>http://localhost:5985/wsman</a:Address>
+      <a:ReferenceParameters>
+        <w:ResourceURI>http://schemas.microsoft.com/powershell/Microsoft.PowerShell</w:ResourceURI>
+        <w:SelectorSet>
+          <w:Selector Name="ShellId">11111111-1111-1111-1111-111111111111</w:Selector>
+        </w:SelectorSet>
+      </a:ReferenceParameters>
+    </w:ResourceCreated>
   </s:Body>
 </s:Envelope>`
 		w.Header().Set("Content-Type", "application/soap+xml;charset=UTF-8")
@@ -39,14 +46,17 @@ func TestClient_Create(t *testing.T) {
 
 	client := NewClient(server.URL, transport.NewHTTPTransport())
 
-	shellID, err := client.Create(context.Background(), nil, "")
+	epr, err := client.Create(context.Background(), nil, "")
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
 
-	// Verify shell ID is a valid UUID (client-generated)
-	if len(shellID) != 36 || shellID[8] != '-' || shellID[13] != '-' {
-		t.Errorf("shellID = %q, want valid UUID format", shellID)
+	// Verify EPR is valid
+	if epr.Address == "" {
+		t.Error("EPR Address is empty")
+	}
+	if epr.ResourceURI != ResourceURIPowerShell {
+		t.Errorf("EPR ResourceURI = %q, want %q", epr.ResourceURI, ResourceURIPowerShell)
 	}
 
 	// Verify request contained correct action
@@ -57,6 +67,16 @@ func TestClient_Create(t *testing.T) {
 	// Verify request contained PowerShell resource URI
 	if !strings.Contains(receivedBody, ResourceURIPowerShell) {
 		t.Errorf("request missing PowerShell resource URI")
+	}
+}
+
+func dummyEPR() *EndpointReference {
+	return &EndpointReference{
+		Address:     "http://localhost:5985/wsman",
+		ResourceURI: ResourceURIPowerShell,
+		Selectors: []Selector{
+			{Name: "ShellId", Value: "test-shell-id"},
+		},
 	}
 }
 
@@ -86,7 +106,7 @@ func TestClient_Command(t *testing.T) {
 
 	client := NewClient(server.URL, transport.NewHTTPTransport())
 
-	commandID, err := client.Command(context.Background(), "test-shell-id", "", "")
+	commandID, err := client.Command(context.Background(), dummyEPR(), "", "")
 	if err != nil {
 		t.Fatalf("Command failed: %v", err)
 	}
@@ -127,7 +147,7 @@ func TestClient_Send(t *testing.T) {
 
 	client := NewClient(server.URL, transport.NewHTTPTransport())
 
-	err := client.Send(context.Background(), "shell-id", "command-id", "stdin", []byte("test-data"))
+	err := client.Send(context.Background(), dummyEPR(), "command-id", "stdin", []byte("test-data"))
 	if err != nil {
 		t.Fatalf("Send failed: %v", err)
 	}
@@ -164,7 +184,7 @@ func TestClient_Receive(t *testing.T) {
 
 	client := NewClient(server.URL, transport.NewHTTPTransport())
 
-	result, err := client.Receive(context.Background(), "shell-id", "command-id")
+	result, err := client.Receive(context.Background(), dummyEPR(), "command-id")
 	if err != nil {
 		t.Fatalf("Receive failed: %v", err)
 	}
@@ -198,7 +218,7 @@ func TestClient_Signal(t *testing.T) {
 
 	client := NewClient(server.URL, transport.NewHTTPTransport())
 
-	err := client.Signal(context.Background(), "shell-id", "command-id", SignalTerminate)
+	err := client.Signal(context.Background(), dummyEPR(), "command-id", SignalTerminate)
 	if err != nil {
 		t.Fatalf("Signal failed: %v", err)
 	}
@@ -233,7 +253,7 @@ func TestClient_Delete(t *testing.T) {
 
 	client := NewClient(server.URL, transport.NewHTTPTransport())
 
-	err := client.Delete(context.Background(), "shell-id")
+	err := client.Delete(context.Background(), dummyEPR())
 	if err != nil {
 		t.Fatalf("Delete failed: %v", err)
 	}

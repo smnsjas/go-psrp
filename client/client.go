@@ -342,7 +342,7 @@ func (c *Client) Connect(ctx context.Context) error {
 		if c.wsman == nil {
 			return fmt.Errorf("wsman client not initialized")
 		}
-		c.backend = powershell.NewWSManBackend(c.wsman, powershell.NewWSManTransport(nil, "", ""))
+		c.backend = powershell.NewWSManBackend(c.wsman, powershell.NewWSManTransport(nil, nil, ""))
 	}
 
 	// 2. Connect Backend (Prepare Transport)
@@ -394,8 +394,10 @@ func (c *Client) Connect(ctx context.Context) error {
 	// Drain result is discarded - we just need to consume the state message
 	// Note: We need the ShellID from the backend
 	// TODO: Add ShellID() to RunspaceBackend interface? Yes, we did.
-	if c.backend.ShellID() != "" {
-		_, _ = c.wsman.Receive(drainCtx, c.backend.ShellID(), "")
+	if wsmanBackend, ok := c.backend.(*powershell.WSManBackend); ok {
+		if epr := wsmanBackend.EPR(); epr != nil {
+			_, _ = c.wsman.Receive(drainCtx, epr, "")
+		}
 	}
 
 	c.connected = true
@@ -693,7 +695,7 @@ func (c *Client) runPipelineReceive(ctx context.Context, transport io.Reader, pl
 		// Fragment flags: bit 0 = start, bit 1 = end
 		flags := header[16]
 		isStart := flags&0x01 != 0
-		isEnd := flags&0x02 != 0
+		isEnd := flags&0x02 != 0 // Assuming bit 1 is for 'end' based on common patterns
 
 		// For now, assume single-fragment messages (most common case)
 		// TODO: Handle multi-fragment messages by accumulating blobs
@@ -712,4 +714,132 @@ func (c *Client) runPipelineReceive(ctx context.Context, transport io.Reader, pl
 			}
 		}
 	}
+}
+
+// ShellID returns the identifier of the underlying shell.
+// Returns empty string if not connected.
+func (c *Client) ShellID() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.backend == nil {
+		return ""
+	}
+	return c.backend.ShellID()
+}
+
+// Disconnect disconnects from the remote session without closing it.
+// The session remains running on the server and can be reconnected to later.
+// Note: This only works if the backend supports it (WSMan).
+func (c *Client) Disconnect(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Check if backend supports Disconnect
+	if wsmanBackend, ok := c.backend.(*powershell.WSManBackend); ok {
+		return wsmanBackend.Disconnect(ctx)
+	}
+
+	return fmt.Errorf("disconnect not supported on this transport")
+}
+
+// Reconnect connects to an existing disconnected shell.
+// usage: client.Reconnect(ctx, shellID)
+func (c *Client) Reconnect(ctx context.Context, shellID string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// 1. Ensure backend is initialized (but not opened)
+	if c.backend == nil {
+		switch c.config.Transport {
+		case TransportHvSocket:
+			return fmt.Errorf("reconnect not supported on HvSocket transport")
+		default: // WSMan
+			if c.wsman == nil {
+				return fmt.Errorf("wsman client not initialized")
+			}
+			c.backend = powershell.NewWSManBackend(c.wsman, powershell.NewWSManTransport(nil, nil, ""))
+		}
+	}
+
+	// 2. Determine backend type and call Reattach
+	if wsmanBackend, ok := c.backend.(*powershell.WSManBackend); ok {
+		// Use the new Reattach method
+		// We need to create the pool first if it doesn't exist?
+		// Reattach takes a pool argument.
+		if c.psrpPool == nil {
+			// Do NOT overwrite c.poolID with uuid.New() here.
+			// It is initialized in New() and potentially updated via SetPoolID().
+			// We must use the correct PoolID for reconnection.
+
+			// We need the transport from the backend
+			transport := c.backend.Transport()
+			if t, ok := transport.(*powershell.WSManTransport); ok {
+				t.SetContext(ctx)
+			}
+			c.psrpPool = runspace.New(transport, c.poolID)
+			if os.Getenv("PSRP_DEBUG") != "" {
+				c.psrpPool.EnableDebugLogging()
+			}
+		}
+
+		if err := wsmanBackend.Reattach(ctx, c.psrpPool, shellID); err != nil {
+			return fmt.Errorf("backend reattach: %w", err)
+		}
+		c.connected = true
+
+		// Sync message ID (SessionCapability=1, ConnectRunspacePool=2 were sent)
+		c.messageID = 2
+		c.psrpPool.SetMessageID(2)
+
+		// Initialize semaphore for concurrent command limiting (same as Connect)
+		maxConcurrent := c.config.MaxConcurrentCommands
+		if maxConcurrent <= 0 {
+			maxConcurrent = 5 // Default
+		}
+		c.semaphore = make(chan struct{}, maxConcurrent)
+	} else {
+		// Fallback or error for other backends (HvSocket doesn't support Reconnect yet/same way)
+		return fmt.Errorf("reconnect not supported on this transport")
+	}
+
+	return nil
+}
+
+// SetSessionID sets the WSMan SessionID (useful for testing session persistence).
+func (c *Client) SetSessionID(sessionID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.wsman != nil {
+		c.wsman.SetSessionID(sessionID)
+	}
+}
+
+// PoolID returns the PSRP RunspacePool ID.
+func (c *Client) PoolID() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.poolID.String()
+}
+
+// SetPoolID sets the PSRP RunspacePool ID (must be called before Connect/Reconnect).
+func (c *Client) SetPoolID(poolID string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	id, err := uuid.Parse(poolID)
+	if err != nil {
+		return err
+	}
+	c.poolID = id
+	return nil
+}
+
+// Enumerate lists available shells on the server (returns raw XML for now).
+func (c *Client) Enumerate(ctx context.Context) ([]string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.wsman != nil {
+		return c.wsman.Enumerate(ctx)
+	}
+	return nil, fmt.Errorf("enumerate not supported on this transport")
 }

@@ -90,3 +90,34 @@ const (
 	// ResourceURIPowerShell is the resource URI for PowerShell remoting sessions.
 	ResourceURIPowerShell = "http://schemas.microsoft.com/powershell/Microsoft.PowerShell"
 )
+
+// WSMan Action URIs for Enumeration.
+const (
+	// ActionEnumerate enumerates resources.
+	ActionEnumerate = "http://schemas.xmlsoap.org/ws/2004/09/enumeration/Enumerate"
+
+	// ActionEnumerateResponse is the response to Enumerate.
+	ActionEnumerateResponse = "http://schemas.xmlsoap.org/ws/2004/09/enumeration/EnumerateResponse"
+)
+
+// WSMan Action URIs for Disconnected Sessions.
+const (
+	// ActionDisconnect disconnects the shell (server-side keep alive).
+	ActionDisconnect = "http://schemas.microsoft.com/wbem/wsman/1/windows/shell/Disconnect"
+
+	// ActionDisconnectResponse is the response to Disconnect.
+	ActionDisconnectResponse = "http://schemas.microsoft.com/wbem/wsman/1/windows/shell/DisconnectResponse"
+
+	// ActionReconnect reconnects to a disconnected shell (same client).
+	ActionReconnect = "http://schemas.microsoft.com/wbem/wsman/1/windows/shell/Reconnect"
+
+	// ActionReconnectResponse is the response to Reconnect.
+	ActionReconnectResponse = "http://schemas.microsoft.com/wbem/wsman/1/windows/shell/ReconnectResponse"
+
+	// ActionConnect connects to a disconnected shell (new client - different from Reconnect).
+	// This is WSManConnectShellEx semantics which includes PSRP handshake data.
+	ActionConnect = "http://schemas.microsoft.com/wbem/wsman/1/windows/shell/Connect"
+
+	// ActionConnectResponse is the response to Connect.
+	ActionConnectResponse = "http://schemas.microsoft.com/wbem/wsman/1/windows/shell/ConnectResponse"
+)

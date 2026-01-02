@@ -26,16 +26,15 @@ type RunspaceBackend interface {
 	// This includes establishing the connection and performing any necessary handshakes.
 	Init(ctx context.Context, pool *runspace.Pool) error
 
-	// PreparePipeline performs backend-specific setup for a new pipeline.
+	// PreparePipeline creates the transport for a specific pipeline.
 	// This is called before the pipeline is invoked.
-	// content represents the CreatePipeline message payload (base64 encoded) required by WSMan.
+	// payload represents the CreatePipeline message payload (base64 encoded) required by WSMan.
 	// Returns:
 	// - pipelineTransport: io.Reader for receiving this pipeline's output (for WSMan, a per-command transport)
 	// - cleanup: function to call after the pipeline completes
 	// - error: any error during setup
-	PreparePipeline(ctx context.Context, p *pipeline.Pipeline, content string) (io.Reader, func(), error)
+	PreparePipeline(ctx context.Context, p *pipeline.Pipeline, payload string) (io.Reader, func(), error)
 
-	// ShellID returns the backend-specific identifier (e.g. WSMan ShellID).
-	// Returns empty string if not applicable.
+	// ShellID returns the identifier of the underlying shell/runspace.
 	ShellID() string
 }

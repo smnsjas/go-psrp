@@ -60,6 +60,12 @@ func main() {
 	configName := flag.String("configname", "", "PowerShell configuration name (optional, for HvSocket)")
 	domain := flag.String("domain", ".", "Domain for HvSocket auth (use '.' for local accounts)")
 
+	// Session persistence flags
+	doDisconnect := flag.Bool("disconnect", false, "Disconnect from shell after execution (instead of closing)")
+	reconnectShellID := flag.String("reconnect", "", "Reconnect to existing ShellID")
+	sessionID := flag.String("sessionid", "", "Explicit SessionID (uuid:...) for testing persistence")
+	poolID := flag.String("poolid", "", "Explicit PoolID (uuid:...) for reconnection")
+
 	flag.Parse()
 
 	// Validate required flags
@@ -154,16 +160,41 @@ func main() {
 		os.Exit(1)
 	}
 
+	if *sessionID != "" {
+		psrp.SetSessionID(*sessionID)
+	}
+	if *poolID != "" {
+		if err := psrp.SetPoolID(*poolID); err != nil {
+			fmt.Fprintf(os.Stderr, "Invalid PoolID: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
-	// Connect to server
+	// Connect to server (or reconnect)
 	fmt.Printf("Connecting to %s...\n", psrp.Endpoint())
-	if err := psrp.Connect(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "Error connecting: %v\n", err)
-		os.Exit(1)
+
+	if *reconnectShellID != "" {
+		// Reconnect to existing shell
+		fmt.Printf("Reconnecting to shell %s...\n", *reconnectShellID)
+		if err := psrp.Reconnect(ctx, *reconnectShellID); err != nil {
+			fmt.Fprintf(os.Stderr, "Error reconnecting: %v\n", err)
+			os.Exit(1)
+		}
+	} else {
+		// Create new session
+		if err := psrp.Connect(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "Error connecting: %v\n", err)
+			os.Exit(1)
+		}
 	}
-	defer psrp.Close(ctx)
+
+	// Defer Close ONLY if we are NOT disconnecting
+	if !*doDisconnect {
+		defer psrp.Close(ctx)
+	}
 
 	fmt.Println("Connected!")
 
@@ -183,12 +214,62 @@ func main() {
 		fmt.Println(formatObject(obj))
 	}
 
+	// Print information stream (Write-Host output)
+	if len(result.Information) > 0 {
+		fmt.Println("Information:")
+		for _, obj := range result.Information {
+			fmt.Println(formatObject(obj))
+		}
+	}
+
+	// Print warnings
+	if len(result.Warnings) > 0 {
+		fmt.Println("Warnings:")
+		for _, obj := range result.Warnings {
+			fmt.Println(formatObject(obj))
+		}
+	}
+
+	// Print verbose
+	if len(result.Verbose) > 0 {
+		fmt.Println("Verbose:")
+		for _, obj := range result.Verbose {
+			fmt.Println(formatObject(obj))
+		}
+	}
+
+	// Print debug
+	if len(result.Debug) > 0 {
+		fmt.Println("Debug:")
+		for _, obj := range result.Debug {
+			fmt.Println(formatObject(obj))
+		}
+	}
+
 	if result.HadErrors {
 		fmt.Fprintln(os.Stderr, "Errors:")
 		for _, obj := range result.Errors {
 			fmt.Fprintln(os.Stderr, formatObject(obj))
 		}
 		os.Exit(1)
+	}
+
+	// Handle Disconnect
+	if *doDisconnect {
+		shellID := psrp.ShellID()
+		poolIDVal := psrp.PoolID()
+		fmt.Printf("\nDisconnecting from shell: %s (PoolID: %s)\n", shellID, poolIDVal)
+
+		if err := psrp.Disconnect(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "Error disconnecting: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("Disconnected successfully. You can reconnect using:")
+		if *sessionID != "" {
+			fmt.Printf("  ./psrp-client -server %s -user %s -tls -ntlm -insecure -reconnect %s -sessionid %q -poolid %q -script \"Write-Host 'Back'\"\n", *server, *username, shellID, *sessionID, poolIDVal)
+		} else {
+			fmt.Printf("  -reconnect %s -poolid %s\n", shellID, poolIDVal)
+		}
 	}
 }
 

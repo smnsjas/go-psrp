@@ -17,12 +17,15 @@ import (
 
 // PoolClient defines the WSMan operations needed by RunspacePool.
 type PoolClient interface {
-	Create(ctx context.Context, options map[string]string, creationXML string) (string, error)
-	Delete(ctx context.Context, shellID string) error
-	Command(ctx context.Context, shellID, commandID, arguments string) (string, error)
-	Send(ctx context.Context, shellID, commandID, stream string, data []byte) error
-	Receive(ctx context.Context, shellID, commandID string) (*wsman.ReceiveResult, error)
-	Signal(ctx context.Context, shellID, commandID, code string) error
+	Create(ctx context.Context, options map[string]string, creationXML string) (*wsman.EndpointReference, error)
+	Delete(ctx context.Context, epr *wsman.EndpointReference) error
+	Command(ctx context.Context, epr *wsman.EndpointReference, commandID, arguments string) (string, error)
+	Send(ctx context.Context, epr *wsman.EndpointReference, commandID, stream string, data []byte) error
+	Receive(ctx context.Context, epr *wsman.EndpointReference, commandID string) (*wsman.ReceiveResult, error)
+	Signal(ctx context.Context, epr *wsman.EndpointReference, commandID, code string) error
+	Disconnect(ctx context.Context, epr *wsman.EndpointReference) error
+	Reconnect(ctx context.Context, shellID string) error
+	Connect(ctx context.Context, shellID string, connectXML string) ([]byte, error)
 	CloseIdleConnections()
 }
 
@@ -38,7 +41,8 @@ type WSManBackend struct {
 	mu sync.RWMutex
 
 	client    PoolClient
-	shellID   string
+	epr       *wsman.EndpointReference
+	shellID   string // Kept for ShellID() compatibility and Reconnect
 	opened    bool
 	closed    bool
 	transport *WSManTransport // Reference to the transport for configuration
@@ -57,6 +61,13 @@ func (b *WSManBackend) ShellID() string {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return b.shellID
+}
+
+// EPR returns the EndpointReference for this pool.
+func (b *WSManBackend) EPR() *wsman.EndpointReference {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.epr
 }
 
 // Connect implements RunspaceBackend. For WSMan, the transport is already set up.
@@ -94,12 +105,27 @@ func (b *WSManBackend) Init(ctx context.Context, pool *runspace.Pool) error {
 		"protocolversion": "2.3",
 	}
 
-	shellID, err := b.client.Create(ctx, options, creationXML)
+	epr, err := b.client.Create(ctx, options, creationXML)
 	if err != nil {
 		return err
 	}
 
-	b.shellID = shellID
+	// Enforce the correct ResourceURI for PowerShell.
+	// Some servers might return the generic WinRS URI in the Create response,
+	// but subsequent commands must target the PowerShell URI.
+	epr.ResourceURI = wsman.ResourceURIPowerShell
+
+	b.epr = epr
+	// Configure transport to use the new EPR
+	b.transport.Configure(b.client, epr, "")
+
+	// Extract ShellID from selectors for compatibility
+	for _, s := range epr.Selectors {
+		if s.Name == "ShellId" {
+			b.shellID = s.Value
+			break
+		}
+	}
 	b.opened = true
 
 	// 3. Open PSRP pool (skip handshake send as we did it in Create)
@@ -119,12 +145,94 @@ func (b *WSManBackend) Close(ctx context.Context) error {
 		return nil // Already closed
 	}
 
-	err := b.client.Delete(ctx, b.shellID)
+	err := b.client.Delete(ctx, b.epr)
 	if err != nil {
 		return err
 	}
 
 	b.closed = true
+	return nil
+}
+
+// PreparePipeline creates the WSMan command and returns a per-pipeline transport.
+
+// Disconnect disconnects the WSMan shell.
+func (b *WSManBackend) Disconnect(ctx context.Context) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if !b.opened {
+		return ErrPoolNotOpened
+	}
+	if b.closed {
+		return ErrPoolClosed
+	}
+
+	// Call WSMan Disconnect
+	if err := b.client.Disconnect(ctx, b.epr); err != nil {
+		return err
+	}
+
+	// Mark as closed/disconnected locally (we can't use it anymore until reconnect)
+	b.closed = true
+	return nil
+}
+
+// Reconnect reconnects the WSMan shell.
+// This is a stub for the interface, but typically Reconnect creates a new client state.
+// Here we just proxy.
+func (b *WSManBackend) Reconnect(ctx context.Context, shellID string) error {
+	return b.client.Reconnect(ctx, shellID)
+}
+
+// Reattach connects to an existing disconnected shell using WSManConnectShellEx semantics.
+// This is for NEW clients connecting to a session that was disconnected.
+func (b *WSManBackend) Reattach(ctx context.Context, pool *runspace.Pool, shellID string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.opened {
+		return nil // Already opened
+	}
+
+	// 1. Get PSRP handshake fragments from pool (SessionCapability + ConnectRunspacePool)
+	connectFrags, err := pool.GetConnectHandshakeFragments()
+	if err != nil {
+		return fmt.Errorf("get connect fragments: %w", err)
+	}
+	connectXML := base64.StdEncoding.EncodeToString(connectFrags)
+
+	// 2. Send WSMan Connect (NOT Reconnect) with PSRP data piggybacked
+	respData, err := b.client.Connect(ctx, shellID, connectXML)
+	if err != nil {
+		return fmt.Errorf("wsman connect: %w", err)
+	}
+
+	// 3. Reconstruct EPR for this session
+	b.epr = &wsman.EndpointReference{
+		ResourceURI: wsman.ResourceURIPowerShell,
+		Selectors: []wsman.Selector{
+			{Name: "ShellId", Value: shellID},
+		},
+	}
+	// Configure transport to use the new EPR
+	b.transport.Configure(b.client, b.epr, "")
+
+	b.shellID = shellID
+	b.opened = true
+
+	// 4. Process the PSRP response data (contains CONNECT_RUNSPACEPOOL response + state)
+	if len(respData) > 0 {
+		if err := pool.ProcessConnectResponse(respData); err != nil {
+			return fmt.Errorf("process connect response: %w", err)
+		}
+	}
+
+	// 5. Mark pool as opened
+	// Note: We do NOT start the dispatch loop here for WSMan.
+	// WSMan uses per-pipeline receive loops via runPipelineReceive with specific CommandId.
+	// The dispatch loop is for HvSocket where all data flows through one shared transport.
+	pool.ResumeOpened()
 	return nil
 }
 
@@ -144,7 +252,7 @@ func (b *WSManBackend) PreparePipeline(ctx context.Context, p *pipeline.Pipeline
 	// We use the ID from the pipeline to ensure proper routing of Receive responses
 	pipelineID := strings.ToUpper(p.ID().String())
 
-	returnedID, err := b.client.Command(ctx, b.shellID, pipelineID, payload)
+	returnedID, err := b.client.Command(ctx, b.epr, pipelineID, payload)
 	if err != nil {
 		return nil, nil, fmt.Errorf("create wsman command: %w", err)
 	}
@@ -152,7 +260,7 @@ func (b *WSManBackend) PreparePipeline(ctx context.Context, p *pipeline.Pipeline
 	// 2. Create a per-pipeline transport for receiving
 	// Each pipeline gets its own transport with its specific commandID
 	// This allows concurrent pipelines to receive independently
-	pipelineTransport := NewWSManTransport(b.client, b.shellID, returnedID)
+	pipelineTransport := NewWSManTransport(b.client, b.epr, returnedID)
 	pipelineTransport.SetContext(ctx)
 
 	// 3. Setup cleanup function
@@ -160,7 +268,7 @@ func (b *WSManBackend) PreparePipeline(ctx context.Context, p *pipeline.Pipeline
 		// Terminate the command on WSMan side
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_ = b.client.Signal(ctx, b.shellID, returnedID, SignalTerminate)
+		_ = b.client.Signal(ctx, b.epr, returnedID, wsman.SignalTerminate)
 	}
 
 	// 4. Skip PSRP Invoke Send
