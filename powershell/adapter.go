@@ -12,8 +12,8 @@ import (
 
 // WSManClient defines the WSMan operations needed by the adapter.
 type WSManClient interface {
-	Send(ctx context.Context, shellID, commandID, stream string, data []byte) error
-	Receive(ctx context.Context, shellID, commandID string) (*wsman.ReceiveResult, error)
+	Send(ctx context.Context, epr *wsman.EndpointReference, commandID, stream string, data []byte) error
+	Receive(ctx context.Context, epr *wsman.EndpointReference, commandID string) (*wsman.ReceiveResult, error)
 }
 
 // Adapter bridges WSMan's request/response model to go-psrpcore's io.ReadWriter interface.
@@ -22,7 +22,7 @@ type Adapter struct {
 	mu sync.Mutex
 
 	client    WSManClient
-	shellID   string
+	epr       *wsman.EndpointReference
 	commandID string
 
 	// Read buffering
@@ -34,10 +34,10 @@ type Adapter struct {
 }
 
 // NewAdapter creates a new adapter for the given WSMan client and command.
-func NewAdapter(client WSManClient, shellID, commandID string) *Adapter {
+func NewAdapter(client WSManClient, epr *wsman.EndpointReference, commandID string) *Adapter {
 	return &Adapter{
 		client:    client,
-		shellID:   shellID,
+		epr:       epr,
 		commandID: commandID,
 		ctx:       context.Background(),
 	}
@@ -57,7 +57,7 @@ func (a *Adapter) Write(p []byte) (int, error) {
 	ctx := a.ctx
 	a.mu.Unlock()
 
-	err := a.client.Send(ctx, a.shellID, a.commandID, "stdin", p)
+	err := a.client.Send(ctx, a.epr, a.commandID, "stdin", p)
 	if err != nil {
 		return 0, err
 	}
@@ -90,7 +90,7 @@ func (a *Adapter) Read(p []byte) (int, error) {
 	}
 
 	// Poll for more data
-	result, err := a.client.Receive(a.ctx, a.shellID, a.commandID)
+	result, err := a.client.Receive(a.ctx, a.epr, a.commandID)
 	if err != nil {
 		return 0, err
 	}

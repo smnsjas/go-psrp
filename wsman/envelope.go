@@ -87,12 +87,6 @@ type SelectorSet struct {
 	Selectors []Selector `xml:"w:Selector"`
 }
 
-// Selector represents a single selector key-value pair.
-type Selector struct {
-	Name  string `xml:"Name,attr"`
-	Value string `xml:",chardata"`
-}
-
 // OptionSet contains options for the operation.
 type OptionSet struct {
 	MustUnderstand string   `xml:"s:mustUnderstand,attr,omitempty"`

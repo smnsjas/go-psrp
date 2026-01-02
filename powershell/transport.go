@@ -3,12 +3,16 @@ package powershell
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"fmt"
 	"io"
 	"sync"
+
+	"github.com/smnsjas/go-psrp/wsman"
 )
 
+// WSManTransport implements io.ReadWriter over WSMan Send/Receive operations.
+// This is the bridge between go-psrpcore (which expects io.ReadWriter) and
+// our WSMan client (which provides HTTP-based Send/Receive).
 // WSManTransport implements io.ReadWriter over WSMan Send/Receive operations.
 // This is the bridge between go-psrpcore (which expects io.ReadWriter) and
 // our WSMan client (which provides HTTP-based Send/Receive).
@@ -17,7 +21,7 @@ type WSManTransport struct {
 	writeMu sync.Mutex // Serializes writes to ensure fragment order
 
 	client    PoolClient
-	shellID   string
+	epr       *wsman.EndpointReference
 	commandID string
 	ctx       context.Context
 
@@ -27,11 +31,11 @@ type WSManTransport struct {
 }
 
 // NewWSManTransport creates a transport that bridges WSMan to io.ReadWriter.
-// The client, shellID, and commandID can be set later via Configure if needed.
-func NewWSManTransport(client PoolClient, shellID, commandID string) *WSManTransport {
+// The client, epr, and commandID can be set later via Configure if needed.
+func NewWSManTransport(client PoolClient, epr *wsman.EndpointReference, commandID string) *WSManTransport {
 	return &WSManTransport{
 		client:    client,
-		shellID:   shellID,
+		epr:       epr,
 		commandID: commandID,
 		ctx:       context.Background(),
 	}
@@ -62,7 +66,7 @@ func (t *WSManTransport) Write(p []byte) (int, error) {
 	}
 
 	// Send PSRP data to stdin stream
-	err := t.client.Send(ctx, t.shellID, t.commandID, "stdin", p)
+	err := t.client.Send(ctx, t.epr, t.commandID, "stdin", p)
 	if err != nil {
 		return 0, fmt.Errorf("wsman send: %w", err)
 	}
@@ -105,20 +109,14 @@ func (t *WSManTransport) Read(p []byte) (int, error) {
 
 		// Receive output for this command.
 		// Note: For concurrent pipelines, the transport must be configured per-pipeline.
-		result, err := t.client.Receive(t.ctx, t.shellID, t.commandID)
+		result, err := t.client.Receive(t.ctx, t.epr, t.commandID)
 		if err != nil {
 			return 0, fmt.Errorf("wsman receive: %w", err)
 		}
 
-		// Decode and buffer the stdout (it comes as base64 from WSMan)
+		// Buffer the stdout (already decoded from base64 by wsman.Client)
 		if len(result.Stdout) > 0 {
-			decoded, err := base64.StdEncoding.DecodeString(string(result.Stdout))
-			if err != nil {
-				// If not base64, use raw bytes
-				t.readBuf.Write(result.Stdout)
-			} else {
-				t.readBuf.Write(decoded)
-			}
+			t.readBuf.Write(result.Stdout)
 		}
 
 		// Mark done if command completed
@@ -148,16 +146,16 @@ func (t *WSManTransport) Close() error {
 	ctx := t.ctx
 	t.mu.Unlock()
 
-	return t.client.Signal(ctx, t.shellID, t.commandID, SignalTerminate)
+	return t.client.Signal(ctx, t.epr, t.commandID, SignalTerminate)
 }
 
 // Configure sets the WSMan client and IDs for the transport.
 // This allows the transport to be created before the shell/command are established.
-func (t *WSManTransport) Configure(client PoolClient, shellID, commandID string) {
+func (t *WSManTransport) Configure(client PoolClient, epr *wsman.EndpointReference, commandID string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.client = client
-	t.shellID = shellID
+	t.epr = epr
 	t.commandID = commandID
 }
 

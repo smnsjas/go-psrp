@@ -2,12 +2,14 @@ package powershell
 
 import (
 	"context"
+
+	"github.com/smnsjas/go-psrp/wsman"
 )
 
 // Pipeline represents a PowerShell pipeline running in a RunspacePool.
 type Pipeline struct {
 	client    PoolClient
-	shellID   string
+	epr       *wsman.EndpointReference
 	commandID string
 }
 
@@ -21,7 +23,7 @@ func (p *Pipeline) CommandID() string {
 func (p *Pipeline) GetAdapter() *Adapter {
 	return &Adapter{
 		client:    p.client,
-		shellID:   p.shellID,
+		epr:       p.epr,
 		commandID: p.commandID,
 		ctx:       context.Background(),
 	}
@@ -29,7 +31,7 @@ func (p *Pipeline) GetAdapter() *Adapter {
 
 // Close terminates this pipeline.
 func (p *Pipeline) Close(ctx context.Context) error {
-	return p.client.Signal(ctx, p.shellID, p.commandID, SignalTerminate)
+	return p.client.Signal(ctx, p.epr, p.commandID, SignalTerminate)
 }
 
 // SignalTerminate is the signal code to terminate a command.

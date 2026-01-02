@@ -28,10 +28,22 @@ func main() {
 	useNTLM := flag.Bool("ntlm", false, "Use NTLM authentication")
 	insecure := flag.Bool("insecure", false, "Skip TLS certificate verification")
 	concurrent := flag.Int("concurrent", 3, "Number of concurrent commands to run")
+
+	// HvSocket (PowerShell Direct) flags
+	useHvSocket := flag.Bool("hvsocket", false, "Use Hyper-V Socket (PowerShell Direct) transport")
+	vmID := flag.String("vmid", "", "VM GUID for HvSocket connection")
+	configName := flag.String("configname", "", "PowerShell configuration name (optional, for HvSocket)")
+
 	flag.Parse()
 
-	if *server == "" || *user == "" {
+	if (*server == "" && !*useHvSocket) || *user == "" {
 		fmt.Fprintln(os.Stderr, "Usage: psrp-demo -server hostname -user username [-tls] [-ntlm] [-insecure] [-concurrent N]")
+		fmt.Fprintln(os.Stderr, "   OR: psrp-demo -hvsocket -vmid <VMID> -user username [-configname name] [-concurrent N]")
+		os.Exit(1)
+	}
+
+	if *useHvSocket && *vmID == "" {
+		fmt.Fprintln(os.Stderr, "Error: -vmid is required when using -hvsocket")
 		os.Exit(1)
 	}
 
@@ -59,6 +71,14 @@ func main() {
 	}
 	if *useNTLM {
 		cfg.AuthType = client.AuthNTLM
+	}
+
+	// HvSocket transport configuration
+	if *useHvSocket {
+		cfg.Transport = client.TransportHvSocket
+		cfg.VMID = *vmID
+		cfg.ConfigurationName = *configName
+		cfg.Domain = *domain // Use provided domain or "."
 	}
 
 	// Create client

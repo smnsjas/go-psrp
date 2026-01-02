@@ -117,6 +117,11 @@ func (b *HvSocketBackend) Init(ctx context.Context, pool *runspace.Pool) error {
 	return nil
 }
 
+// ShellID returns the implementation identifier.
+func (b *HvSocketBackend) ShellID() string {
+	return b.poolID.String()
+}
+
 func (b *HvSocketBackend) PreparePipeline(ctx context.Context, p *pipeline.Pipeline, payload string) (io.Reader, func(), error) {
 	// For HvSocket (OutOfProc), we don't need a separate transport per pipeline.
 	// The shared adapter handles all pipelines. Return nil for the transport.
@@ -176,10 +181,6 @@ func (b *HvSocketBackend) Close(ctx context.Context) error {
 
 	hvDebugf("=== Backend close sequence complete ===")
 	return nil
-}
-
-func (b *HvSocketBackend) ShellID() string {
-	return ""
 }
 
 // debugConn wraps a net.Conn with read/write logging
