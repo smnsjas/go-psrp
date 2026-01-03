@@ -29,6 +29,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -65,6 +66,9 @@ func main() {
 	reconnectShellID := flag.String("reconnect", "", "Reconnect to existing ShellID")
 	sessionID := flag.String("sessionid", "", "Explicit SessionID (uuid:...) for testing persistence")
 	poolID := flag.String("poolid", "", "Explicit PoolID (uuid:...) for reconnection")
+	listSessions := flag.Bool("list-sessions", false, "List disconnected sessions on server")
+	recoverCommandID := flag.String("recover", "", "Recover output from pipeline with CommandID (requires -reconnect)")
+	asyncExec := flag.Bool("async", false, "Start command and disconnect immediately (fire-and-forget)")
 
 	flag.Parse()
 
@@ -90,7 +94,46 @@ func main() {
 
 	// Check for Kerberos cred cache first (SSO)
 	var pass string
-	hasCache := (*ccache != "" || os.Getenv("KRB5CCNAME") != "") && !*useNTLM
+
+	// Auto-detect Kerberos cache on macOS if -kerberos is set and no cache specified
+	detectedCache := *ccache
+	if *useKerberos && detectedCache == "" && os.Getenv("KRB5CCNAME") == "" {
+		// Try to detect macOS API cache using klist -l
+		out, err := exec.Command("klist", "-l").Output()
+		if err == nil {
+			lines := strings.Split(string(out), "\n")
+			for _, line := range lines {
+				// Look for API: cache entries (first non-header line with API:)
+				if strings.Contains(line, "API:") {
+					fields := strings.Fields(line)
+					for _, f := range fields {
+						if strings.HasPrefix(f, "API:") {
+							detectedCache = f
+							break
+						}
+					}
+					if detectedCache != "" {
+						break
+					}
+				}
+			}
+		}
+
+		// If we found an API: cache, export it to a temp file (gokrb5 can't read API caches)
+		if strings.HasPrefix(detectedCache, "API:") {
+			tempCache := fmt.Sprintf("/tmp/psrp_krb5cc_%d", os.Getpid())
+			// Use kcc copy to copy credentials from API cache to file cache (Heimdal command)
+			cmd := exec.Command("kcc", "copy", detectedCache, tempCache)
+			if err := cmd.Run(); err == nil {
+				detectedCache = tempCache
+			} else {
+				// kcc not available, can't use API cache with gokrb5
+				detectedCache = ""
+			}
+		}
+	}
+
+	hasCache := (detectedCache != "" || os.Getenv("KRB5CCNAME") != "") && !*useNTLM
 
 	// Get password only if username is provided and no cache (or strict NTLM usage)
 	// For SSO (no username), password is not needed
@@ -118,8 +161,8 @@ func main() {
 	// Kerberos settings apply to both AuthNegotiate (default) and explicit -kerberos
 	cfg.Realm = *realm
 	cfg.Krb5ConfPath = *krb5Conf
-	cfg.CCachePath = *ccache
-	// Default to environment variables if flags not set
+	cfg.CCachePath = detectedCache // Use auto-detected cache if available
+	// Default to environment variables if not set
 	if cfg.CCachePath == "" {
 		cfg.CCachePath = os.Getenv("KRB5CCNAME")
 	}
@@ -176,7 +219,71 @@ func main() {
 	// Connect to server (or reconnect)
 	fmt.Printf("Connecting to %s...\n", psrp.Endpoint())
 
+	// Handle list-sessions mode (doesn't require full connection)
+	if *listSessions {
+		// Connect to enumerate (creates client but doesn't fully connect)
+		if err := psrp.Connect(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "Error connecting: %v\n", err)
+			os.Exit(1)
+		}
+		defer psrp.Close(ctx)
+
+		sessions, err := psrp.ListDisconnectedSessions(ctx)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error listing sessions: %v\n", err)
+			os.Exit(1)
+		}
+
+		if len(sessions) == 0 {
+			fmt.Println("No disconnected sessions found.")
+			return
+		}
+
+		fmt.Printf("Found %d session(s):\n", len(sessions))
+		for i, s := range sessions {
+			fmt.Printf("\n%d. ShellID: %s\n", i+1, s.ShellID)
+			if s.Name != "" {
+				fmt.Printf("   Name: %s\n", s.Name)
+			}
+			if s.State != "" {
+				fmt.Printf("   State: %s\n", s.State)
+			}
+			if s.Owner != "" {
+				fmt.Printf("   Owner: %s\n", s.Owner)
+			}
+			if len(s.Pipelines) > 0 {
+				fmt.Printf("   Pipelines (%d):\n", len(s.Pipelines))
+				for _, p := range s.Pipelines {
+					fmt.Printf("     - CommandID: %s\n", p.CommandID)
+				}
+			}
+		}
+		return
+	}
+
 	if *reconnectShellID != "" {
+		// Check if we're recovering output from a pipeline
+		if *recoverCommandID != "" {
+			fmt.Printf("Recovering output from shell %s, command %s...\n", *reconnectShellID, *recoverCommandID)
+			result, err := psrp.RecoverPipelineOutput(ctx, *reconnectShellID, *recoverCommandID)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error recovering output: %v\n", err)
+				os.Exit(1)
+			}
+
+			fmt.Println("Recovered Output:")
+			for _, obj := range result.Output {
+				fmt.Println(formatObject(obj))
+			}
+			if result.HadErrors {
+				fmt.Fprintln(os.Stderr, "Errors:")
+				for _, obj := range result.Errors {
+					fmt.Fprintln(os.Stderr, formatObject(obj))
+				}
+			}
+			return
+		}
+
 		// Reconnect to existing shell
 		fmt.Printf("Reconnecting to shell %s...\n", *reconnectShellID)
 		if err := psrp.Reconnect(ctx, *reconnectShellID); err != nil {
@@ -191,14 +298,42 @@ func main() {
 		}
 	}
 
-	// Defer Close ONLY if we are NOT disconnecting
-	if !*doDisconnect {
+	// Defer Close ONLY if we are NOT disconnecting and not async
+	if !*doDisconnect && !*asyncExec {
 		defer psrp.Close(ctx)
 	}
 
 	fmt.Println("Connected!")
 
-	// Execute script
+	// Handle async execution - start command and disconnect immediately
+	if *asyncExec {
+		fmt.Printf("Starting async execution: %s\n", *script)
+		commandID, err := psrp.ExecuteAsync(ctx, *script)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error starting async execution: %v\n", err)
+			os.Exit(1)
+		}
+
+		shellID := psrp.ShellID()
+		poolIDVal := psrp.PoolID()
+		fmt.Println("---")
+		fmt.Println("Command started in background!")
+		fmt.Printf("ShellID: %s\n", shellID)
+		fmt.Printf("PoolID: %s\n", poolIDVal)
+		fmt.Printf("CommandID: %s\n", commandID)
+
+		// Disconnect the shell
+		if err := psrp.Disconnect(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "Error disconnecting: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("\nDisconnected! Command continues running on server.")
+		fmt.Println("To recover output later, run:")
+		fmt.Printf("  ./psrp-client ... -reconnect %s -recover %s -poolid %q\n", shellID, commandID, poolIDVal)
+		return
+	}
+
+	// Execute script (sync)
 	fmt.Printf("Executing: %s\n", *script)
 	fmt.Println("---")
 

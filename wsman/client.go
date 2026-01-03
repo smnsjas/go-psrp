@@ -559,38 +559,136 @@ func (c *Client) Connect(ctx context.Context, shellID string, connectXML string)
 	return respBody, nil
 }
 
+// EnumerateShell represents a shell discovered via WSMan Enumerate.
+type EnumerateShell struct {
+	ShellID string
+	Name    string
+	State   string
+	Owner   string
+}
+
+// enumerateResponse is for parsing WSMan Enumerate response.
+type enumerateResponse struct {
+	XMLName xml.Name `xml:"Envelope"`
+	Body    struct {
+		EnumerateResponse struct {
+			Items struct {
+				Shells []struct {
+					ShellID string `xml:"ShellId"`
+					Name    string `xml:"Name"`
+					State   string `xml:"State"`
+					Owner   string `xml:"Owner"`
+				} `xml:"Shell"`
+			} `xml:"Items"`
+		} `xml:"EnumerateResponse"`
+	} `xml:"Body"`
+}
+
 // Enumerate lists available shells on the server.
-func (c *Client) Enumerate(ctx context.Context) ([]string, error) {
+// Returns a list of shells with their IDs, which can be used for reconnection.
+func (c *Client) Enumerate(ctx context.Context) ([]EnumerateShell, error) {
 	env := NewEnvelope().
 		WithAction(ActionEnumerate).
 		WithTo(c.endpoint).
-		WithResourceURI(ResourceURIPowerShell).
+		WithResourceURI(NsShell). // Use shell namespace to enumerate shells
 		WithMessageID("uuid:" + strings.ToUpper(uuid.New().String())).
 		WithReplyTo(AddressAnonymous).
-		WithSessionID(c.sessionID)
+		WithSessionID(c.sessionID).
+		WithMaxEnvelopeSize(153600).
+		WithOperationTimeout("PT60S")
 
-	// Body: <wsen:Enumerate />
-	body := struct {
-		XMLName xml.Name `xml:"wsen:Enumerate"`
-		Wsen    string   `xml:"xmlns:wsen,attr"`
-	}{
-		Wsen: NsEnumeration,
-	}
-	bodyBytes, err := xml.Marshal(body)
-	if err != nil {
-		return nil, fmt.Errorf("marshal enumerate body: %w", err)
-	}
-	env.WithBody(bodyBytes)
+	// Body with OptimizeEnumeration and MaxElements
+	body := fmt.Sprintf(`<wsen:Enumerate xmlns:wsen="%s" xmlns:wsman="%s">
+  <wsman:OptimizeEnumeration/>
+  <wsman:MaxElements>32000</wsman:MaxElements>
+</wsen:Enumerate>`, NsEnumeration, NsWsman)
+	env.WithBody([]byte(body))
 
 	respBody, err := c.sendEnvelope(ctx, env)
 	if err != nil {
 		return nil, fmt.Errorf("enumerate: %w", err)
 	}
 
-	// Parse full response to find Item/ShellId
-	// This requires more complex XML parsing as EnumerateResponse contains Items.
-	// For now, we will return raw XML string in a slice as a placeholder if parsing is too heavy to add right now.
-	// TODO: Add proper EnumerateResponse struct.
-	// Returning the raw bytes as string for now to unblock.
-	return []string{string(respBody)}, nil
+	// Parse response
+	var resp enumerateResponse
+	if err := xml.Unmarshal(respBody, &resp); err != nil {
+		// Return empty list on parse error, log for debugging
+		if os.Getenv("PSRP_DEBUG") != "" {
+			fmt.Fprintf(os.Stderr, "DEBUG: Enumerate response parse error: %v\nResponse: %s\n", err, string(respBody))
+		}
+		return nil, nil
+	}
+
+	// Convert to EnumerateShell
+	var shells []EnumerateShell
+	for _, s := range resp.Body.EnumerateResponse.Items.Shells {
+		shells = append(shells, EnumerateShell{
+			ShellID: s.ShellID,
+			Name:    s.Name,
+			State:   s.State,
+			Owner:   s.Owner,
+		})
+	}
+
+	return shells, nil
+}
+
+// EnumerateCommands lists commands (pipelines) for a specific shell.
+// This is used to discover disconnected pipelines within a shell.
+func (c *Client) EnumerateCommands(ctx context.Context, shellID string) ([]string, error) {
+	env := NewEnvelope().
+		WithAction(ActionEnumerate).
+		WithTo(c.endpoint).
+		WithResourceURI(NsShell + "/Command"). // Command resource URI
+		WithMessageID("uuid:" + strings.ToUpper(uuid.New().String())).
+		WithReplyTo(AddressAnonymous).
+		WithSessionID(c.sessionID).
+		WithMaxEnvelopeSize(153600).
+		WithOperationTimeout("PT60S")
+
+	// Body with filter by ShellId
+	body := fmt.Sprintf(`<wsen:Enumerate xmlns:wsen="%s" xmlns:wsman="%s">
+  <wsman:OptimizeEnumeration/>
+  <wsman:MaxElements>32000</wsman:MaxElements>
+  <wsman:Filter Dialect="http://schemas.dmtf.org/wbem/wsman/1/wsman/SelectorFilter">
+    <wsman:SelectorSet>
+      <wsman:Selector Name="ShellId">%s</wsman:Selector>
+    </wsman:SelectorSet>
+  </wsman:Filter>
+</wsen:Enumerate>`, NsEnumeration, NsWsman, shellID)
+	env.WithBody([]byte(body))
+
+	respBody, err := c.sendEnvelope(ctx, env)
+	if err != nil {
+		return nil, fmt.Errorf("enumerate commands: %w", err)
+	}
+
+	// Parse response for CommandId elements
+	type commandEnumerateResp struct {
+		XMLName xml.Name `xml:"Envelope"`
+		Body    struct {
+			EnumerateResponse struct {
+				Items struct {
+					Commands []struct {
+						CommandID string `xml:"CommandId"`
+					} `xml:"Command"`
+				} `xml:"Items"`
+			} `xml:"EnumerateResponse"`
+		} `xml:"Body"`
+	}
+
+	var resp commandEnumerateResp
+	if err := xml.Unmarshal(respBody, &resp); err != nil {
+		if os.Getenv("PSRP_DEBUG") != "" {
+			fmt.Fprintf(os.Stderr, "DEBUG: EnumerateCommands response parse error: %v\nResponse: %s\n", err, string(respBody))
+		}
+		return nil, nil
+	}
+
+	var commandIDs []string
+	for _, cmd := range resp.Body.EnumerateResponse.Items.Commands {
+		commandIDs = append(commandIDs, cmd.CommandID)
+	}
+
+	return commandIDs, nil
 }

@@ -651,6 +651,54 @@ func (c *Client) Execute(ctx context.Context, script string) (*Result, error) {
 	}, nil
 }
 
+// ExecuteAsync starts a PowerShell script execution but returns immediately without waiting
+// for output. Returns the CommandID (PipelineID) for later recovery of output.
+// This is useful for starting long-running commands and then disconnecting.
+func (c *Client) ExecuteAsync(ctx context.Context, script string) (string, error) {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return "", errors.New("client is closed")
+	}
+	psrpPool := c.psrpPool
+	backend := c.backend
+	c.mu.Unlock()
+
+	// Create a go-psrpcore pipeline for this execution
+	psrpPipeline, err := psrpPool.CreatePipeline(script)
+	if err != nil {
+		return "", fmt.Errorf("create pipeline: %w", err)
+	}
+
+	// Get the CreatePipeline fragment data (base64) for WSMan encapsulation
+	c.mu.Lock()
+	c.messageID++
+	msgID := c.messageID
+	c.mu.Unlock()
+
+	createPipelineData, err := psrpPipeline.GetCreatePipelineDataWithID(msgID)
+	if err != nil {
+		return "", fmt.Errorf("get create pipeline data: %w", err)
+	}
+	payload := base64.StdEncoding.EncodeToString(createPipelineData)
+
+	// Create the command without waiting for output
+	c.cmdMu.Lock()
+	_, _, err = backend.PreparePipeline(ctx, psrpPipeline, payload)
+	c.cmdMu.Unlock()
+	if err != nil {
+		return "", fmt.Errorf("prepare pipeline: %w", err)
+	}
+
+	// Invoke the pipeline (transitions PSRP state)
+	if err = psrpPipeline.Invoke(ctx); err != nil {
+		return "", fmt.Errorf("invoke pipeline: %w", err)
+	}
+
+	// Return the pipeline ID (commandID) for later recovery
+	return psrpPipeline.ID().String(), nil
+}
+
 // runPipelineReceive runs a per-pipeline receive loop.
 // It reads PSRP fragments from the pipeline-specific transport and feeds them to the pipeline.
 // This is used by WSMan where each command has its own stdout stream.
@@ -833,13 +881,141 @@ func (c *Client) SetPoolID(poolID string) error {
 	return nil
 }
 
-// Enumerate lists available shells on the server (returns raw XML for now).
-func (c *Client) Enumerate(ctx context.Context) ([]string, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+// DisconnectedPipeline represents a pipeline within a disconnected session.
+type DisconnectedPipeline struct {
+	CommandID string
+}
 
-	if c.wsman != nil {
-		return c.wsman.Enumerate(ctx)
+// DisconnectedSession represents a disconnected PowerShell session that can be reconnected.
+type DisconnectedSession struct {
+	ShellID   string
+	Name      string
+	State     string
+	Owner     string
+	Pipelines []DisconnectedPipeline
+}
+
+// ListDisconnectedSessions queries the server for disconnected shells and their pipelines.
+func (c *Client) ListDisconnectedSessions(ctx context.Context) ([]DisconnectedSession, error) {
+	c.mu.Lock()
+	wsman := c.wsman
+	c.mu.Unlock()
+
+	if wsman == nil {
+		return nil, fmt.Errorf("list sessions not supported on this transport")
 	}
-	return nil, fmt.Errorf("enumerate not supported on this transport")
+
+	// Get shells
+	shells, err := wsman.Enumerate(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("enumerate shells: %w", err)
+	}
+
+	// Build sessions with their pipelines
+	var sessions []DisconnectedSession
+	for _, shell := range shells {
+		session := DisconnectedSession{
+			ShellID: shell.ShellID,
+			Name:    shell.Name,
+			State:   shell.State,
+			Owner:   shell.Owner,
+		}
+
+		// Get pipelines for this shell
+		commandIDs, err := wsman.EnumerateCommands(ctx, shell.ShellID)
+		if err == nil && len(commandIDs) > 0 {
+			for _, cmdID := range commandIDs {
+				session.Pipelines = append(session.Pipelines, DisconnectedPipeline{CommandID: cmdID})
+			}
+		}
+
+		sessions = append(sessions, session)
+	}
+
+	return sessions, nil
+}
+
+// RecoverPipelineOutput retrieves buffered output from a disconnected pipeline.
+// This reconnects to the shell and receives any output that was buffered before disconnect.
+func (c *Client) RecoverPipelineOutput(ctx context.Context, shellID, commandID string) (*Result, error) {
+	c.mu.Lock()
+	wsman := c.wsman
+	c.mu.Unlock()
+
+	if wsman == nil {
+		return nil, fmt.Errorf("recover output not supported on this transport")
+	}
+
+	// First reconnect to the shell if not already connected
+	if err := c.Reconnect(ctx, shellID); err != nil {
+		return nil, fmt.Errorf("reconnect to shell: %w", err)
+	}
+
+	// Now we need to receive output for the specific commandID
+	// The output may have been buffered on the server during disconnect
+	c.mu.Lock()
+	backend := c.backend
+	psrpPool := c.psrpPool
+	c.mu.Unlock()
+
+	if backend == nil || psrpPool == nil {
+		return nil, fmt.Errorf("not connected")
+	}
+
+	// Create a transport for this specific commandID
+	wsmanBackend, ok := backend.(*powershell.WSManBackend)
+	if !ok {
+		return nil, fmt.Errorf("recover output only supported for WSMan transport")
+	}
+
+	// Get EPR from backend
+	epr := wsmanBackend.EPR()
+	if epr == nil {
+		return nil, fmt.Errorf("no endpoint reference available")
+	}
+
+	// Receive output using the commandID
+	var output []interface{}
+	var errOutput []interface{}
+	hadErrors := false
+
+	// Poll for output until done
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
+		result, err := wsman.Receive(ctx, epr, commandID)
+		if err != nil {
+			return nil, fmt.Errorf("receive output: %w", err)
+		}
+
+		// Process stdout data - collect for output
+		// The raw bytes are PSRP fragments; for now, we'll deserialize them
+		if len(result.Stdout) > 0 {
+			// Try to parse as PSRP and extract strings
+			deser := serialization.NewDeserializer()
+			results, err := deser.Deserialize(result.Stdout)
+			deser.Close()
+			if err != nil {
+				// If not parseable, treat as raw string
+				output = append(output, string(result.Stdout))
+			} else {
+				output = append(output, results...)
+			}
+		}
+
+		// Check if done
+		if result.Done {
+			break
+		}
+	}
+
+	return &Result{
+		Output:    output,
+		Errors:    errOutput,
+		HadErrors: hadErrors,
+	}, nil
 }
