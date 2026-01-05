@@ -215,6 +215,46 @@ func (c *Client) logf(format string, v ...interface{}) {
 	}
 }
 
+// ensureLogger initializes the logger from environment variables if not already set.
+func (c *Client) ensureLogger() {
+	if c.slogLogger != nil {
+		return
+	}
+
+	var level slog.Level
+	envLevel := os.Getenv("PSRP_LOG_LEVEL")
+	envDebug := os.Getenv("PSRP_DEBUG")
+
+	if envLevel != "" {
+		switch strings.ToLower(envLevel) {
+		case "debug":
+			level = slog.LevelDebug
+		case "info":
+			level = slog.LevelInfo
+		case "warn":
+			level = slog.LevelWarn
+		case "error":
+			level = slog.LevelError
+		default:
+			// Invalid level, default to debug if debug flag is set, else ignore
+			if envDebug != "" {
+				level = slog.LevelDebug
+			} else {
+				return
+			}
+		}
+	} else if envDebug != "" {
+		level = slog.LevelDebug
+	} else {
+		return
+	}
+
+	// Create logger
+	c.slogLogger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		Level: level,
+	}))
+}
+
 // logfLocked logs a debug message assuming the client lock is already held.
 func (c *Client) logfLocked(format string, v ...interface{}) {
 	if c.slogLogger != nil {
@@ -331,10 +371,9 @@ func (c *Client) ReconnectSession(ctx context.Context, state *SessionState) erro
 		if c.psrpPool == nil {
 			transport := backend.Transport()
 			c.psrpPool = runspace.New(transport, c.poolID)
+			c.ensureLogger()
 			if c.slogLogger != nil {
 				c.psrpPool.SetSlogLogger(c.slogLogger)
-			} else if os.Getenv("PSRP_DEBUG") != "" || os.Getenv("PSRP_LOG_LEVEL") != "" {
-				c.psrpPool.EnableDebugLogging()
 			}
 		}
 
@@ -384,10 +423,9 @@ func (c *Client) ReconnectSession(ctx context.Context, state *SessionState) erro
 				t.SetContext(ctx)
 			}
 			c.psrpPool = runspace.New(transport, c.poolID)
+			c.ensureLogger()
 			if c.slogLogger != nil {
 				c.psrpPool.SetSlogLogger(c.slogLogger)
-			} else if os.Getenv("PSRP_DEBUG") != "" || os.Getenv("PSRP_LOG_LEVEL") != "" {
-				c.psrpPool.EnableDebugLogging()
 			}
 		}
 
