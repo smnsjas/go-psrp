@@ -169,6 +169,32 @@ cfg.AuthType = client.AuthNegotiate  // Uses Windows SSPI on Windows
 cfg.UseTLS = true
 ```
 
+## Logging
+
+ This library enables structured logging (DEBUG, INFO, WARN, ERROR) for both the client logic and the underlying PSRP protocol.
+
+### Environment Variables
+
+ Global logging can be enabled setting the `PSRP_LOG_LEVEL` environment variable:
+
+ ```bash
+ export PSRP_LOG_LEVEL=info  # options: debug, info, warn, error
+ ```
+
+### Custom Logger
+
+ You can inject your own `slog.Logger` into the client:
+
+ ```go
+ // Create a JSON logger
+ logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+     Level: slog.LevelInfo,
+ }))
+ 
+ // Inject it into the client
+ client.SetSlogLogger(logger)
+ ```
+
 ## CLI Tool
 
 A command-line tool is included for testing and quick scripts:
@@ -212,6 +238,7 @@ go build ./cmd/psrp-client
 | `-vmid` | VM GUID for HVSocket | - |
 | `-domain` | Domain for HVSocket auth | `.` |
 | `-configname` | PowerShell configuration name | - |
+| `-loglevel` | Log level (`debug`, `info`, `warn`, `error`) | - |
 
 ## Package Structure
 
