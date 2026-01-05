@@ -73,12 +73,12 @@ func main() {
 	asyncExec := flag.Bool("async", false, "Start command and disconnect immediately (fire-and-forget)")
 	saveSession := flag.String("save-session", "", "Save session state to file on disconnect/exit")
 	restoreSession := flag.String("restore-session", "", "Restore session state from file")
-	debug := flag.Bool("debug", false, "Enable debug logging")
+	logLevel := flag.String("loglevel", "", "Log level: debug, info, warn, error (empty = no logging)")
 
 	flag.Parse()
 
-	if *debug {
-		os.Setenv("PSRP_DEBUG", "1")
+	if *logLevel != "" {
+		os.Setenv("PSRP_DEBUG", "1") // Enable legacy debug as well
 	}
 
 	fmt.Println("PSRP Client - Codebase Fix v4 (Structured Logging)")
@@ -220,8 +220,24 @@ func main() {
 	}
 
 	// Configure structured logging if requested
-	if *debug {
-		opts := &slog.HandlerOptions{Level: slog.LevelDebug}
+	// Configure structured logging if requested
+	if *logLevel != "" {
+		var level slog.Level
+		switch strings.ToLower(*logLevel) {
+		case "debug":
+			level = slog.LevelDebug
+		case "info":
+			level = slog.LevelInfo
+		case "warn":
+			level = slog.LevelWarn
+		case "error":
+			level = slog.LevelError
+		default:
+			fmt.Fprintf(os.Stderr, "Invalid log level '%s'. Valid values: debug, info, warn, error\n", *logLevel)
+			os.Exit(1)
+		}
+
+		opts := &slog.HandlerOptions{Level: level}
 		logger := slog.New(slog.NewTextHandler(os.Stderr, opts))
 		psrp.SetSlogLogger(logger)
 	}
