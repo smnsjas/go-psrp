@@ -41,16 +41,16 @@ This library builds on [go-psrpcore](https://github.com/smnsjas/go-psrpcore) by 
 
 ## Features
 
-- 🔌 **Multiple Transports**
+- **Multiple Transports**
   - **WSMan/WinRM** - HTTP/HTTPS with SOAP (standard remote PowerShell)
   - **HVSocket** - PowerShell Direct to Hyper-V VMs (Windows only)
-- 🔐 **Authentication**
+- **Authentication**
   - Basic, NTLM (explicit credentials)
   - Kerberos (pure Go via gokrb5, cross-platform)
   - Windows SSPI (native Negotiate/Kerberos on Windows)
-- 📦 **Full PSRP Support** - RunspacePools, Pipelines, Output streams
-- 🚀 **High-Level API** - Simple command execution
-- 🛡️ **Secure** - TLS 1.2+ by default, pure Go implementation
+- **Full PSRP Support** - RunspacePools, Pipelines, Output streams
+- **High-Level API** - Simple command execution
+- **Secure** - TLS 1.2+ by default, pure Go implementation
 
 ## Installation
 
@@ -239,6 +239,12 @@ go build ./cmd/psrp-client
 | `-domain` | Domain for HVSocket auth | `.` |
 | `-configname` | PowerShell configuration name | - |
 | `-loglevel` | Log level (`debug`, `info`, `warn`, `error`) | - |
+| `-list-sessions` | List disconnected sessions on server | `false` |
+| `-cleanup` | Cleanup (remove) disconnected sessions | `false` |
+| `-recover` | Recover output from pipeline with CommandID | - |
+| `-async` | Start command and disconnect immediately | `false` |
+| `-save-session` | Save session state to file on disconnect | - |
+| `-restore-session` | Restore session state from file | - |
 
 ## Package Structure
 
