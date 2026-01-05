@@ -67,21 +67,29 @@ func main() {
 	sessionID := flag.String("sessionid", "", "Explicit SessionID (uuid:...) for testing persistence")
 	poolID := flag.String("poolid", "", "Explicit PoolID (uuid:...) for reconnection")
 	listSessions := flag.Bool("list-sessions", false, "List disconnected sessions on server")
+	cleanupSessions := flag.Bool("cleanup", false, "Cleanup (remove) disconnected sessions (used with -list-sessions)")
 	recoverCommandID := flag.String("recover", "", "Recover output from pipeline with CommandID (requires -reconnect)")
 	asyncExec := flag.Bool("async", false, "Start command and disconnect immediately (fire-and-forget)")
+	saveSession := flag.String("save-session", "", "Save session state to file on disconnect/exit")
+	restoreSession := flag.String("restore-session", "", "Restore session state from file")
 
 	flag.Parse()
 
+	fmt.Println("PSRP Client - Codebase Fix v3 (HvSocket Recover Fix)")
+
 	// Validate required flags
-	if *server == "" && !*useHvSocket {
-		fmt.Fprintln(os.Stderr, "Error: -server is required (or use -hvsocket with -vmid)")
-		flag.Usage()
-		os.Exit(1)
-	}
-	if *useHvSocket && *vmID == "" {
-		fmt.Fprintln(os.Stderr, "Error: -vmid is required when using -hvsocket")
-		flag.Usage()
-		os.Exit(1)
+	// If restoring session, we don't need server or vmid flags as they come from the state file
+	if *restoreSession == "" {
+		if *server == "" && !*useHvSocket {
+			fmt.Fprintln(os.Stderr, "Error: -server is required (or use -hvsocket with -vmid)")
+			flag.Usage()
+			os.Exit(1)
+		}
+		if *useHvSocket && *vmID == "" {
+			fmt.Fprintln(os.Stderr, "Error: -vmid is required when using -hvsocket")
+			flag.Usage()
+			os.Exit(1)
+		}
 	}
 	// Validate flags
 	// Username is required unless the platform supports SSO (e.g. Windows)
@@ -145,7 +153,9 @@ func main() {
 	// Password is required unless: using Kerberos with cache, or explicit -kerberos flag with cache
 	// Password is required if username provided, unless: using Kerberos with cache
 	// If SSO (no username), password is not required
-	if *username != "" && pass == "" && !hasCache {
+	// But if strictly HvSocket (which often needs creds) or restoring session where we need creds to reconnect:
+	needCreds := *username != "" || (*restoreSession != "" && !hasCache && !auth.SupportsSSO())
+	if needCreds && pass == "" && !hasCache {
 		fmt.Fprintln(os.Stderr, "Error: password is required (use -pass, PSRP_PASSWORD env, or stdin)")
 		os.Exit(1)
 	}
@@ -236,25 +246,36 @@ func main() {
 
 		if len(sessions) == 0 {
 			fmt.Println("No disconnected sessions found.")
-			return
+		} else {
+			fmt.Printf("Found %d session(s):\n", len(sessions))
+			for i, s := range sessions {
+				fmt.Printf("\n%d. ShellID: %s\n", i+1, s.ShellID)
+				if s.Name != "" {
+					fmt.Printf("   Name: %s\n", s.Name)
+				}
+				if s.State != "" {
+					fmt.Printf("   State: %s\n", s.State)
+				}
+				if s.Owner != "" {
+					fmt.Printf("   Owner: %s\n", s.Owner)
+				}
+				if len(s.Pipelines) > 0 {
+					fmt.Printf("   Pipelines (%d):\n", len(s.Pipelines))
+					for _, p := range s.Pipelines {
+						fmt.Printf("     - CommandID: %s\n", p.CommandID)
+					}
+				}
+			}
 		}
 
-		fmt.Printf("Found %d session(s):\n", len(sessions))
-		for i, s := range sessions {
-			fmt.Printf("\n%d. ShellID: %s\n", i+1, s.ShellID)
-			if s.Name != "" {
-				fmt.Printf("   Name: %s\n", s.Name)
-			}
-			if s.State != "" {
-				fmt.Printf("   State: %s\n", s.State)
-			}
-			if s.Owner != "" {
-				fmt.Printf("   Owner: %s\n", s.Owner)
-			}
-			if len(s.Pipelines) > 0 {
-				fmt.Printf("   Pipelines (%d):\n", len(s.Pipelines))
-				for _, p := range s.Pipelines {
-					fmt.Printf("     - CommandID: %s\n", p.CommandID)
+		if *cleanupSessions && len(sessions) > 0 {
+			fmt.Println("\nCleaning up...")
+			for _, s := range sessions {
+				fmt.Printf("Removing session %s... ", s.ShellID)
+				if err := psrp.RemoveDisconnectedSession(ctx, s); err != nil {
+					fmt.Printf("Failed: %v\n", err)
+				} else {
+					fmt.Println("Done")
 				}
 			}
 		}
@@ -262,33 +283,47 @@ func main() {
 	}
 
 	if *reconnectShellID != "" {
-		// Check if we're recovering output from a pipeline
-		if *recoverCommandID != "" {
-			fmt.Printf("Recovering output from shell %s, command %s...\n", *reconnectShellID, *recoverCommandID)
-			result, err := psrp.RecoverPipelineOutput(ctx, *reconnectShellID, *recoverCommandID)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error recovering output: %v\n", err)
-				os.Exit(1)
-			}
-
-			fmt.Println("Recovered Output:")
-			for _, obj := range result.Output {
-				fmt.Println(formatObject(obj))
-			}
-			if result.HadErrors {
-				fmt.Fprintln(os.Stderr, "Errors:")
-				for _, obj := range result.Errors {
-					fmt.Fprintln(os.Stderr, formatObject(obj))
-				}
-			}
-			return
-		}
-
 		// Reconnect to existing shell
 		fmt.Printf("Reconnecting to shell %s...\n", *reconnectShellID)
 		if err := psrp.Reconnect(ctx, *reconnectShellID); err != nil {
 			fmt.Fprintf(os.Stderr, "Error reconnecting: %v\n", err)
 			os.Exit(1)
+		}
+	} else if *restoreSession != "" {
+		// Restore session from file
+		fmt.Printf("Restoring session from %s...\n", *restoreSession)
+		state, err := client.LoadState(*restoreSession)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading session state: %v\n", err)
+			os.Exit(1)
+		}
+
+		if err := psrp.ReconnectSession(ctx, state); err != nil {
+			fmt.Fprintf(os.Stderr, "Error restoring session: %v\n", err)
+			os.Exit(1)
+		}
+
+		if len(state.PipelineIDs) > 0 {
+			fmt.Printf("Restored session with active pipelines:\n")
+			for _, pid := range state.PipelineIDs {
+				fmt.Printf(" - %s\n", pid)
+			}
+			// Auto-use first pipeline ID if -recover flag is present but empty
+			if *recoverCommandID == "" {
+				*recoverCommandID = state.PipelineIDs[0]
+				fmt.Printf("Auto-recovering pipeline: %s\n", *recoverCommandID)
+			}
+		}
+
+		if len(state.OutputPaths) > 0 {
+			fmt.Printf("Restored session with file recovery paths:\n")
+			for cmdID := range state.OutputPaths {
+				fmt.Printf(" - %s\n", cmdID)
+				if *recoverCommandID == "" {
+					*recoverCommandID = cmdID
+					fmt.Printf("Auto-recovering pipeline: %s\n", *recoverCommandID)
+				}
+			}
 		}
 	} else {
 		// Create new session
@@ -304,6 +339,37 @@ func main() {
 	}
 
 	fmt.Println("Connected!")
+
+	// Handle recovery
+	if *recoverCommandID != "" {
+		shellID := *reconnectShellID
+		if shellID == "" {
+			shellID = psrp.ShellID()
+		}
+		// For HvSocket, we use PoolID as ShellID fallback
+		if shellID == "" {
+			shellID = psrp.PoolID()
+		}
+
+		fmt.Printf("Recovering output from shell %s, command %s...\n", shellID, *recoverCommandID)
+		result, err := psrp.RecoverPipelineOutput(ctx, shellID, *recoverCommandID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error recovering output: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Println("Recovered Output:")
+		for _, obj := range result.Output {
+			fmt.Println(formatObject(obj))
+		}
+		if result.HadErrors {
+			fmt.Fprintln(os.Stderr, "Errors:")
+			for _, obj := range result.Errors {
+				fmt.Fprintln(os.Stderr, formatObject(obj))
+			}
+		}
+		return
+	}
 
 	// Handle async execution - start command and disconnect immediately
 	if *asyncExec {
@@ -321,6 +387,14 @@ func main() {
 		fmt.Printf("ShellID: %s\n", shellID)
 		fmt.Printf("PoolID: %s\n", poolIDVal)
 		fmt.Printf("CommandID: %s\n", commandID)
+
+		// Save session if requested
+		if *saveSession != "" {
+			fmt.Printf("Saving session state to %s...\n", *saveSession)
+			if err := psrp.SaveState(*saveSession); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to save session: %v\n", err)
+			}
+		}
 
 		// Disconnect the shell
 		if err := psrp.Disconnect(ctx); err != nil {
@@ -395,6 +469,13 @@ func main() {
 		poolIDVal := psrp.PoolID()
 		fmt.Printf("\nDisconnecting from shell: %s (PoolID: %s)\n", shellID, poolIDVal)
 
+		if *saveSession != "" {
+			fmt.Printf("Saving session state to %s...\n", *saveSession)
+			if err := psrp.SaveState(*saveSession); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to save session: %v\n", err)
+			}
+		}
+
 		if err := psrp.Disconnect(ctx); err != nil {
 			fmt.Fprintf(os.Stderr, "Error disconnecting: %v\n", err)
 			os.Exit(1)
@@ -462,6 +543,9 @@ func formatObject(v interface{}) string {
 		// For PSObjects, use ToString if available, otherwise format properties
 		if val.ToString != "" {
 			return val.ToString
+		}
+		if val.Value != nil {
+			return formatObject(val.Value)
 		}
 		// Fallback: format as key=value pairs with recursive formatting
 		var parts []string

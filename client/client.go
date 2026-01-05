@@ -4,6 +4,8 @@ package client
 import (
 	"context"
 	"encoding/base64"
+	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf16"
 
 	"github.com/google/uuid"
 	"github.com/smnsjas/go-psrp/powershell"
@@ -132,6 +135,15 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+func encodePowerShellScript(script string) string {
+	u16 := utf16.Encode([]rune(script))
+	buf := make([]byte, len(u16)*2)
+	for i, u := range u16 {
+		binary.LittleEndian.PutUint16(buf[i*2:], u)
+	}
+	return base64.StdEncoding.EncodeToString(buf)
+}
+
 // Client is a high-level PSRP client for executing PowerShell commands.
 type Client struct {
 	mu sync.Mutex
@@ -152,6 +164,249 @@ type Client struct {
 	// Concurrency control
 	semaphore chan struct{} // Limits concurrent command execution
 	cmdMu     sync.Mutex    // Serializes command creation (NTLM auth requires this)
+
+	// File-based recovery state
+	outputFiles map[string]string // Maps PipelineID to remote file path
+}
+
+// SessionState represents the serialized state of a client session
+// needed for persistence and reconnection.
+type SessionState struct {
+	Transport   string   `json:"transport"`              // "wsman" or "hvsocket"
+	PoolID      string   `json:"pool_uuid"`              // RunspacePool UUID
+	SessionID   string   `json:"session_id"`             // PSRP Session ID (often same as PoolID)
+	MessageID   int64    `json:"message_id"`             // Last used message ID
+	RunspaceID  string   `json:"runspace_id,omitempty"`  // Connected Runspace ID (if any)
+	PipelineIDs []string `json:"pipeline_ids,omitempty"` // Active pipeline IDs
+
+	// WSMan specific
+	ShellID string `json:"shell_id,omitempty"`
+
+	// HvSocket specific
+	VMID        string            `json:"vm_id,omitempty"`
+	ServiceID   string            `json:"service_id,omitempty"`
+	OutputPaths map[string]string `json:"output_paths,omitempty"` // HvSocket file recovery paths
+}
+
+// ReconnectSession connects to an existing disconnected session using the provided state.
+// This is the transport-agnostic version of Reconnect.
+func (c *Client) ReconnectSession(ctx context.Context, state *SessionState) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// 1. Restore client state
+	if state.PoolID != "" {
+		if id, err := uuid.Parse(state.PoolID); err == nil {
+			c.poolID = id
+		}
+	}
+	// Restore MessageID sequence
+	if state.MessageID > 0 {
+		c.messageID = uint64(state.MessageID)
+	}
+
+	// Restore OutputPaths for file-based recovery
+	if len(state.OutputPaths) > 0 {
+		c.outputFiles = state.OutputPaths
+	} else {
+		c.outputFiles = make(map[string]string)
+	}
+
+	// 2. Initialize Backend based on Transport
+	switch state.Transport {
+	case "hvsocket": // TransportHvSocket string representation
+		// Update config to match state
+		c.config.Transport = TransportHvSocket
+
+		vmIDStr := c.config.VMID
+		if vmIDStr == "" {
+			vmIDStr = state.VMID
+			c.config.VMID = vmIDStr // Sync config
+		}
+		if vmIDStr == "" {
+			return fmt.Errorf("missing vmid in both config and state")
+		}
+		vmID, err := uuid.Parse(vmIDStr)
+		if err != nil {
+			return fmt.Errorf("parse vmid: %w", err)
+		}
+
+		serviceID := c.config.ConfigurationName
+		if serviceID == "" {
+			serviceID = state.ServiceID
+			c.config.ConfigurationName = serviceID // Sync config
+		}
+
+		backend := powershell.NewHvSocketBackend(
+			vmID,
+			c.config.Domain,
+			c.config.Username,
+			c.config.Password,
+			serviceID,
+			c.poolID,
+		)
+		c.backend = backend
+
+		// Connect backend to establish transport
+		if err := backend.Connect(ctx); err != nil {
+			return fmt.Errorf("connect socket: %w", err)
+		}
+
+		// initialize PSRP pool if needed
+		if c.psrpPool == nil {
+			transport := backend.Transport()
+			c.psrpPool = runspace.New(transport, c.poolID)
+			if os.Getenv("PSRP_DEBUG") != "" {
+				c.psrpPool.EnableDebugLogging()
+			}
+		}
+
+		// Sync message ID (critical for determining next PSRP message ID)
+		c.psrpPool.SetMessageID(c.messageID)
+
+		// Check if we are doing file-based recovery (OutputPaths present)
+		// If so, we can't Reattach (persistence unsupported), so we Start New Session (Open).
+		if len(state.OutputPaths) > 0 {
+			// Start fresh session to read files
+			// Note: pool.Open sends RUNSPACEPOOL_INIT
+			if err := c.psrpPool.Open(ctx); err != nil {
+				return fmt.Errorf("open new session for recovery: %w", err)
+			}
+		} else {
+			// Detailed Reattach (performs PSRP handshake via pool.Connect)
+			if err := backend.Reattach(ctx, c.psrpPool, ""); err != nil {
+				return fmt.Errorf("backend reattach: %w", err)
+			}
+		}
+
+		c.connected = true
+
+		if c.semaphore == nil {
+			maxConcurrent := c.config.MaxConcurrentCommands
+			if maxConcurrent <= 0 {
+				maxConcurrent = 5 // Default
+			}
+			c.semaphore = make(chan struct{}, maxConcurrent)
+		}
+
+		return nil
+	case "wsman", "": // Default to WSMan
+		if c.wsman == nil {
+			return fmt.Errorf("wsman client not initialized")
+		}
+		c.backend = powershell.NewWSManBackend(c.wsman, powershell.NewWSManTransport(nil, nil, ""))
+
+		// Use the WSMan-specific Reconnect logic via Reattach
+		// We need to re-implement the core logic of Reconnect here because calling
+		// c.Reconnect() would deadlock (it locks mutex).
+
+		// Reattach logic adapted from Reconnect:
+		if c.psrpPool == nil {
+			transport := c.backend.Transport()
+			if t, ok := transport.(*powershell.WSManTransport); ok {
+				t.SetContext(ctx)
+			}
+			c.psrpPool = runspace.New(transport, c.poolID)
+			if os.Getenv("PSRP_DEBUG") != "" {
+				c.psrpPool.EnableDebugLogging()
+			}
+		}
+
+		if wsmanBackend, ok := c.backend.(*powershell.WSManBackend); ok {
+			if err := wsmanBackend.Reattach(ctx, c.psrpPool, state.ShellID); err != nil {
+				return fmt.Errorf("backend reattach: %w", err)
+			}
+		}
+
+		c.connected = true
+
+		// Initialize semaphore if not already done
+		if c.semaphore == nil {
+			maxConcurrent := c.config.MaxConcurrentCommands
+			if maxConcurrent <= 0 {
+				maxConcurrent = 5 // Default
+			}
+			c.semaphore = make(chan struct{}, maxConcurrent)
+		}
+
+		// Ensure pool uses the correct message ID
+		c.psrpPool.SetMessageID(c.messageID)
+
+		return nil
+	default:
+		return fmt.Errorf("unknown transport type: %s", state.Transport)
+	}
+}
+
+// SaveState saves the current session state to a file.
+func (c *Client) SaveState(path string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if !c.connected && !c.closed {
+		// If we are just initialized but disconnected, we might still want to save state
+		// if we have enough info (e.g. ShellID/PoolID from previous session)
+	}
+
+	state := &SessionState{
+		PoolID:      c.poolID.String(),
+		SessionID:   c.poolID.String(), // Typically same as PoolID
+		MessageID:   int64(c.messageID),
+		RunspaceID:  "",            // We don't track explicit Runspace ID yet, usually implied by Pool
+		PipelineIDs: []string{},    // pipelines are tracked in runspace pool
+		OutputPaths: c.outputFiles, // Save file recovery paths
+	}
+
+	// Transport specific info
+	if c.config.Transport == TransportHvSocket {
+		state.Transport = "hvsocket"
+		state.VMID = c.config.VMID
+		state.ServiceID = c.config.ConfigurationName // Using config name as ServiceID proxy/context
+	} else {
+		state.Transport = "wsman"
+		if c.backend != nil {
+			state.ShellID = c.backend.ShellID()
+		}
+	}
+
+	// Get active pipelines from PSRP pool if available
+	if c.psrpPool != nil {
+		ids := c.psrpPool.GetActivePipelineIDs()
+		for _, id := range ids {
+			state.PipelineIDs = append(state.PipelineIDs, id.String())
+		}
+	}
+
+	// Serialize to JSON
+	// We use json.MarshalIndent for readability
+	// We write carefully to file
+
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal state: %w", err)
+	}
+
+	// Write to file with restricted permissions (0600)
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		return fmt.Errorf("write state file: %w", err)
+	}
+
+	return nil
+}
+
+// LoadState loads a session state from a file.
+func LoadState(path string) (*SessionState, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read state file: %w", err)
+	}
+
+	var state SessionState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, fmt.Errorf("unmarshal state: %w", err)
+	}
+
+	return &state, nil
 }
 
 // New creates a new PSRP client.
@@ -161,11 +416,16 @@ func New(hostname string, cfg Config) (*Client, error) {
 	}
 
 	// Build endpoint URL
-	scheme := "http"
-	if cfg.UseTLS {
-		scheme = "https"
+	var endpoint string
+	if strings.HasPrefix(hostname, "http://") || strings.HasPrefix(hostname, "https://") {
+		endpoint = hostname
+	} else {
+		scheme := "http"
+		if cfg.UseTLS {
+			scheme = "https"
+		}
+		endpoint = fmt.Sprintf("%s://%s:%d/wsman", scheme, hostname, cfg.Port)
 	}
-	endpoint := fmt.Sprintf("%s://%s:%d/wsman", scheme, hostname, cfg.Port)
 
 	// Create transport with auth
 	tr := transport.NewHTTPTransport(
@@ -283,20 +543,23 @@ func New(hostname string, cfg Config) (*Client, error) {
 		// Refactor `New` to branch.
 
 		return &Client{
-			hostname: hostname,
-			config:   cfg,
-			endpoint: "", // Not relevant for HvSocket? Or VmId?
-			// wsman: nil, // Will be nil for HvSocket
+			hostname:    hostname,
+			config:      cfg,
+			endpoint:    "",
+			semaphore:   make(chan struct{}, cfg.MaxConcurrentCommands),
+			outputFiles: make(map[string]string),
 		}, nil
 
 	default: // WSMan
 		// ... existing WSMan setup ...
 		return &Client{
-			hostname:  hostname,
-			config:    cfg,
-			endpoint:  endpoint,
-			transport: tr,
-			wsman:     wsman.NewClient(endpoint, tr),
+			hostname:    hostname,
+			config:      cfg,
+			endpoint:    endpoint,
+			transport:   tr,
+			wsman:       wsman.NewClient(endpoint, tr),
+			semaphore:   make(chan struct{}, cfg.MaxConcurrentCommands),
+			outputFiles: make(map[string]string),
 		}, nil
 	}
 }
@@ -417,6 +680,9 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	return nil
 }
+
+// Disconnect disconnects the active session without closing it on the server.
+// This is useful for saving state and reconnecting later.
 
 // Close closes the connection to the remote server.
 func (c *Client) Close(ctx context.Context) error {
@@ -665,11 +931,92 @@ func (c *Client) ExecuteAsync(ctx context.Context, script string) (string, error
 	c.mu.Unlock()
 
 	// Create a go-psrpcore pipeline for this execution
-	psrpPipeline, err := psrpPool.CreatePipeline(script)
+	scriptToRun := script
+	var hvSocketFile string
+
+	if c.config.Transport == TransportHvSocket {
+		fileID := uuid.New().String()
+		// We use $env:TEMP which resolves to the user's temp dir on the server.
+		hvSocketFile = fmt.Sprintf(`$env:TEMP\psrp_out_%s.xml`, fileID)
+
+		// Create inner script that runs user command, exports output, and creates a completion marker
+		// We add a 'finally' block to ensure marker is created even if script fails/crashes
+		innerScript := fmt.Sprintf(`$p="%s"; try { & { %s } 2>&1 | Export-Clixml -Path $p -Depth 2 } finally { New-Item "${p}_done" -ItemType File -Force }`, hvSocketFile, script)
+
+		// Encode inner script for -EncodedCommand
+		encodedInner := encodePowerShellScript(innerScript)
+
+		// Run via WMI (Win32_Process) to guarantee detachment from the PSRP session Job Object.
+		// Start-Process is often killed when the PSRP session ends.
+		scriptToRun = fmt.Sprintf(`Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = "powershell.exe -NoProfile -NonInteractive -EncodedCommand %s" } | Out-Null`, encodedInner)
+	}
+
+	psrpPipeline, err := psrpPool.CreatePipeline(scriptToRun)
 	if err != nil {
 		return "", fmt.Errorf("create pipeline: %w", err)
 	}
 
+	if hvSocketFile != "" {
+		c.mu.Lock()
+		if c.outputFiles == nil {
+			c.outputFiles = make(map[string]string)
+		}
+		c.outputFiles[psrpPipeline.ID().String()] = hvSocketFile
+		c.mu.Unlock()
+
+		// Invoke the pipeline to ensure it transitions to Running state and closes input
+		if err := psrpPipeline.Invoke(ctx); err != nil {
+			return "", fmt.Errorf("invoke detached launcher: %w", err)
+		}
+
+		// Wait synchronously for the WMI launcher to finish to ensure process started
+		var errOutput []string
+		var wg sync.WaitGroup
+
+		// Drain channels to prevent blocking
+		go func() {
+			for range psrpPipeline.Output() {
+			}
+		}()
+		go func() {
+			for range psrpPipeline.Warning() {
+			}
+		}()
+		go func() {
+			for range psrpPipeline.Verbose() {
+			}
+		}()
+		go func() {
+			for range psrpPipeline.Debug() {
+			}
+		}()
+		go func() {
+			for range psrpPipeline.Progress() {
+			}
+		}()
+		go func() {
+			for range psrpPipeline.Information() {
+			}
+		}()
+
+		// Capture errors
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for err := range psrpPipeline.Error() {
+				errOutput = append(errOutput, fmt.Sprintf("%v", err))
+			}
+		}()
+
+		// Wait for streams to close
+		wg.Wait()
+
+		// Wait for pipeline state completion
+		if err := psrpPipeline.Wait(); err != nil || len(errOutput) > 0 {
+			return "", fmt.Errorf("failed to launch detached process: %v (errors: %v)", err, errOutput)
+		}
+		return psrpPipeline.ID().String(), nil
+	}
 	// Get the CreatePipeline fragment data (base64) for WSMan encapsulation
 	c.mu.Lock()
 	c.messageID++
@@ -777,17 +1124,27 @@ func (c *Client) ShellID() string {
 
 // Disconnect disconnects from the remote session without closing it.
 // The session remains running on the server and can be reconnected to later.
-// Note: This only works if the backend supports it (WSMan).
+// Note: This only works if the backend supports it (WSMan) or via dirty PSRP disconnect (HvSocket).
 func (c *Client) Disconnect(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Check if backend supports Disconnect
+	// Check if backend supports Disconnect (WSMan)
 	if wsmanBackend, ok := c.backend.(*powershell.WSManBackend); ok {
 		return wsmanBackend.Disconnect(ctx)
 	}
 
-	return fmt.Errorf("disconnect not supported on this transport")
+	// For other transports (HvSocket), use PSRP-level disconnect (close transport without Close message)
+	if c.psrpPool != nil {
+		if err := c.psrpPool.Disconnect(); err != nil {
+			return err
+		}
+		c.connected = false
+		// c.backend = nil // Keep backend if needed? No, backend is dead.
+		return nil
+	}
+
+	return fmt.Errorf("disconnect not supported on this transport or not connected")
 }
 
 // Reconnect connects to an existing disconnected shell.
@@ -898,22 +1255,33 @@ type DisconnectedSession struct {
 // ListDisconnectedSessions queries the server for disconnected shells and their pipelines.
 func (c *Client) ListDisconnectedSessions(ctx context.Context) ([]DisconnectedSession, error) {
 	c.mu.Lock()
-	wsman := c.wsman
+	wClient := c.wsman
 	c.mu.Unlock()
 
-	if wsman == nil {
+	if wClient == nil {
 		return nil, fmt.Errorf("list sessions not supported on this transport")
 	}
 
 	// Get shells
-	shells, err := wsman.Enumerate(ctx)
+	shells, err := wClient.Enumerate(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("enumerate shells: %w", err)
+	}
+
+	// Filter out current shell from list
+	var currentShellID string
+	if c.backend != nil {
+		currentShellID = c.backend.ShellID()
 	}
 
 	// Build sessions with their pipelines
 	var sessions []DisconnectedSession
 	for _, shell := range shells {
+		// Skip our own session
+		if currentShellID != "" && strings.EqualFold(shell.ShellID, currentShellID) {
+			continue
+		}
+
 		session := DisconnectedSession{
 			ShellID: shell.ShellID,
 			Name:    shell.Name,
@@ -922,7 +1290,7 @@ func (c *Client) ListDisconnectedSessions(ctx context.Context) ([]DisconnectedSe
 		}
 
 		// Get pipelines for this shell
-		commandIDs, err := wsman.EnumerateCommands(ctx, shell.ShellID)
+		commandIDs, err := wClient.EnumerateCommands(ctx, shell.ShellID)
 		if err == nil && len(commandIDs) > 0 {
 			for _, cmdID := range commandIDs {
 				session.Pipelines = append(session.Pipelines, DisconnectedPipeline{CommandID: cmdID})
@@ -935,87 +1303,223 @@ func (c *Client) ListDisconnectedSessions(ctx context.Context) ([]DisconnectedSe
 	return sessions, nil
 }
 
+// RemoveDisconnectedSession deletes a disconnected session on the server.
+func (c *Client) RemoveDisconnectedSession(ctx context.Context, session DisconnectedSession) error {
+	c.mu.Lock()
+	wClient := c.wsman
+	c.mu.Unlock()
+
+	if wClient == nil {
+		return fmt.Errorf("remove session not supported on this transport")
+	}
+
+	// Construct EndpointReference for the session
+	epr := &wsman.EndpointReference{
+		ResourceURI: wsman.ResourceURIPowerShell, // Default to PowerShell URI
+		Selectors: []wsman.Selector{
+			{Name: "ShellId", Value: session.ShellID},
+		},
+	}
+
+	// Try to Signal Terminate first (to force close connected sessions)
+	// We ignore errors here because the session might already be broken or not support signal
+	_ = wClient.Signal(ctx, epr, "", "http://schemas.microsoft.com/wbem/wsman/1/windows/shell/signal/terminate")
+
+	if err := wClient.Delete(ctx, epr); err != nil {
+		// If the shell is not found, it means it's already gone/closed (possibly by the Signal above).
+		// We treat this as success.
+		// Error code 2150858843 = "The request for the Windows Remote Shell with ShellId ... failed because the shell was not found"
+		if strings.Contains(err.Error(), "2150858843") || strings.Contains(err.Error(), "shell was not found") {
+			return nil
+		}
+		return fmt.Errorf("delete session: %w", err)
+	}
+
+	return nil
+}
+
 // RecoverPipelineOutput retrieves buffered output from a disconnected pipeline.
 // This reconnects to the shell and receives any output that was buffered before disconnect.
 func (c *Client) RecoverPipelineOutput(ctx context.Context, shellID, commandID string) (*Result, error) {
+
+	// 1. Reconnect if sending new command/connecting to shell
+	// Note: If we just called ReconnectSession (which sets c.connected=true for HvSocket),
+	// we should SKIP c.Reconnect() because c.Reconnect() logic is WSMan specific or might be redundant.
 	c.mu.Lock()
-	wsman := c.wsman
+	alreadyConnected := c.connected && c.psrpPool != nil
 	c.mu.Unlock()
 
-	if wsman == nil {
-		return nil, fmt.Errorf("recover output not supported on this transport")
+	if !alreadyConnected {
+		if err := c.Reconnect(ctx, shellID); err != nil {
+			return nil, fmt.Errorf("reconnect: %w", err)
+		}
+	} else {
+		// Verify pool is open logic is handled by AdoptPipeline check later
 	}
 
-	// First reconnect to the shell if not already connected
-	if err := c.Reconnect(ctx, shellID); err != nil {
-		return nil, fmt.Errorf("reconnect to shell: %w", err)
+	// 2. File-Based Recovery (HvSocket)
+	c.mu.Lock()
+	recoveryFile, hasRecoveryFile := c.outputFiles[commandID]
+	c.mu.Unlock()
+
+	if hasRecoveryFile {
+		// We use the new session to Import the CLIXML file and emit it.
+		// We poll for the '_done' marker file to ensure specific independent process has finished.
+		// Loop checks every 500ms. Context cancellation handles timeout.
+		script := fmt.Sprintf(`
+			$f="%s"
+			$d="${f}_done"
+			while (-not (Test-Path $d)) { Start-Sleep -Milliseconds 500 }
+			if (Test-Path $f) {
+				Import-Clixml -Path $f
+				Remove-Item -Path $f -Force -ErrorAction SilentlyContinue
+			}
+			Remove-Item $d -Force -ErrorAction SilentlyContinue
+		`, recoveryFile)
+		return c.Execute(ctx, script)
 	}
 
-	// Now we need to receive output for the specific commandID
-	// The output may have been buffered on the server during disconnect
 	c.mu.Lock()
 	backend := c.backend
 	psrpPool := c.psrpPool
+	wsmanClient := c.wsman
 	c.mu.Unlock()
 
 	if backend == nil || psrpPool == nil {
 		return nil, fmt.Errorf("not connected")
 	}
 
-	// Create a transport for this specific commandID
-	wsmanBackend, ok := backend.(*powershell.WSManBackend)
-	if !ok {
-		return nil, fmt.Errorf("recover output only supported for WSMan transport")
-	}
+	// Helper to collect results (reused from Execute logic)
+	collectResults := func(pl *pipeline.Pipeline) (*Result, error) {
+		var (
+			output    []interface{}
+			errOutput []interface{}
+			hadErrors bool
+			wg        sync.WaitGroup
+			mu        sync.Mutex
+		)
 
-	// Get EPR from backend
-	epr := wsmanBackend.EPR()
-	if epr == nil {
-		return nil, fmt.Errorf("no endpoint reference available")
-	}
-
-	// Receive output using the commandID
-	var output []interface{}
-	var errOutput []interface{}
-	hadErrors := false
-
-	// Poll for output until done
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
-		}
-
-		result, err := wsman.Receive(ctx, epr, commandID)
-		if err != nil {
-			return nil, fmt.Errorf("receive output: %w", err)
-		}
-
-		// Process stdout data - collect for output
-		// The raw bytes are PSRP fragments; for now, we'll deserialize them
-		if len(result.Stdout) > 0 {
-			// Try to parse as PSRP and extract strings
-			deser := serialization.NewDeserializer()
-			results, err := deser.Deserialize(result.Stdout)
-			deser.Close()
-			if err != nil {
-				// If not parseable, treat as raw string
-				output = append(output, string(result.Stdout))
-			} else {
-				output = append(output, results...)
+		drainChannel := func(ch <-chan *messages.Message, dest *[]interface{}, markError bool) {
+			defer wg.Done()
+			for msg := range ch {
+				if markError {
+					mu.Lock()
+					hadErrors = true
+					mu.Unlock()
+				}
+				deser := serialization.NewDeserializer()
+				results, err := deser.Deserialize(msg.Data)
+				deser.Close()
+				if err != nil {
+					*dest = append(*dest, string(msg.Data))
+					continue
+				}
+				*dest = append(*dest, results...)
 			}
 		}
 
-		// Check if done
-		if result.Done {
-			break
+		// We only collect output and errors for recovery for now (to match WSMan simple recovery),
+		// but we drain others to prevent blocking
+		drainVoid := func(ch <-chan *messages.Message) {
+			defer wg.Done()
+			for range ch {
+			}
+		}
+
+		wg.Add(7)
+		go drainChannel(pl.Output(), &output, false)
+		go drainChannel(pl.Error(), &errOutput, true)
+		go drainVoid(pl.Warning())
+		go drainVoid(pl.Verbose())
+		go drainVoid(pl.Debug())
+		go drainVoid(pl.Progress())
+		go drainVoid(pl.Information())
+
+		wg.Wait()
+
+		if err := pl.Wait(); err != nil {
+			hadErrors = true
+			if len(errOutput) == 0 {
+				errOutput = append(errOutput, err.Error())
+			}
+		}
+
+		return &Result{
+			Output:    output,
+			Errors:    errOutput,
+			HadErrors: hadErrors,
+		}, nil
+	}
+
+	// 1. WSMan Specific Path
+	if wsmanBackend, ok := backend.(*powershell.WSManBackend); ok && wsmanClient != nil {
+		// Use existing WSMan pulled-based recovery if preferred, OR switch to AdoptPipeline if WSManTransport supports it.
+		// For now, keep legacy WSMan recovery for stability if it works for the user (user is likely HvSocket).
+		// BUT the user might use WSMan too.
+		// The existing WSMan logic uses 'wsman.Receive' which is raw WSMan.
+		// Let's keep it for WSMan backend.
+		epr := wsmanBackend.EPR()
+		if epr != nil {
+			// .. existing WSMan logic ...
+			// Copy-paste existing logic here or assume it's better to use the new AdoptPipeline approach for EVERYTHING?
+			// The new AdoptPipeline approach depends on PSRP messages arriving via the Transport.
+			// WSManTransport in go-psrp might NOT be sending messages to the pool if we bypass it with wsman.Receive.
+			// So we MUST keep legacy logic for WSMan unless we refactor WSMan backend significantly.
+
+			var output []interface{}
+			var errOutput []interface{}
+
+			// Poll for output until done
+			for {
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				default:
+				}
+
+				result, err := wsmanClient.Receive(ctx, epr, commandID)
+				if err != nil {
+					return nil, fmt.Errorf("receive output: %w", err)
+				}
+
+				if len(result.Stdout) > 0 {
+					deser := serialization.NewDeserializer()
+					results, err := deser.Deserialize(result.Stdout)
+					deser.Close()
+					if err != nil {
+						output = append(output, string(result.Stdout))
+					} else {
+						output = append(output, results...)
+					}
+				}
+				if result.Done {
+					break
+				}
+			}
+			return &Result{Output: output, Errors: errOutput}, nil
 		}
 	}
 
-	return &Result{
-		Output:    output,
-		Errors:    errOutput,
-		HadErrors: hadErrors,
-	}, nil
+	// 2. Generic PSRP Path (HvSocket / OutOfProc)
+	// Create a pipeline object with the specific ID and adopt it
+	cmdUUID, err := uuid.Parse(commandID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid command id: %w", err)
+	}
+
+	// Create new pipeline attached to pool with specific ID
+	pl := pipeline.NewWithID(psrpPool, c.poolID, cmdUUID)
+
+	// Register with pool
+	if err := psrpPool.AdoptPipeline(pl); err != nil {
+		return nil, fmt.Errorf("adopt pipeline: %w", err)
+	}
+
+	// Ensure dispatch loop is running (safe to call multiple times)
+	// For HvSocket reconnection, Reattach calls pool.Connect which starts it.
+	// But just in case:
+	psrpPool.StartDispatchLoop()
+
+	// Wait/Drain
+	return collectResults(pl)
 }

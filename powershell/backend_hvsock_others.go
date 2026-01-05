@@ -49,3 +49,8 @@ func (b *HvSocketBackend) Close(_ context.Context) error {
 func (b *HvSocketBackend) ShellID() string {
 	return ""
 }
+
+// Reattach returns an error on non-Windows platforms.
+func (b *HvSocketBackend) Reattach(_ context.Context, _ *runspace.Pool, _ string) error {
+	return errors.New("hvsock is only supported on windows")
+}

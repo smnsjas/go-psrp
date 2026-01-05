@@ -37,4 +37,8 @@ type RunspaceBackend interface {
 
 	// ShellID returns the identifier of the underlying shell/runspace.
 	ShellID() string
+
+	// Reattach connects to an existing PSRP runspace pool (persistence).
+	// shellID: For WSMan, this is the existing ShellID. For HvSocket, it may be ignored or validated.
+	Reattach(ctx context.Context, pool *runspace.Pool, shellID string) error
 }

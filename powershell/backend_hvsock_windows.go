@@ -122,6 +122,26 @@ func (b *HvSocketBackend) ShellID() string {
 	return b.poolID.String()
 }
 
+// Reattach connects to an existing runspace pool on the VM.
+// shellID is ignored for HvSocket as the connection is defined by VMID/ConfigName.
+func (b *HvSocketBackend) Reattach(ctx context.Context, pool *runspace.Pool, _ string) error {
+	// 1. Establish socket connection if needed
+	if err := b.Connect(ctx); err != nil {
+		return fmt.Errorf("connect socket: %w", err)
+	}
+
+	// 2. Perform PSRP Reconnection Handshake
+	// pool.Connect sends SESSION_CAPABILITY + CONNECT_RUNSPACEPOOL
+	// and waits for RUNSPACEPOOL_STATE=Opened.
+	hvDebugf("Performing PSRP reconnection handshake...")
+	if err := pool.Connect(ctx); err != nil {
+		return fmt.Errorf("pool connect: %w", err)
+	}
+	hvDebugf("PSRP reconnection successful")
+
+	return nil
+}
+
 func (b *HvSocketBackend) PreparePipeline(ctx context.Context, p *pipeline.Pipeline, payload string) (io.Reader, func(), error) {
 	// For HvSocket (OutOfProc), we don't need a separate transport per pipeline.
 	// The shared adapter handles all pipelines. Return nil for the transport.

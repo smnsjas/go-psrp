@@ -330,6 +330,7 @@ func (c *Client) Delete(ctx context.Context, epr *EndpointReference) error {
 		WithTo(c.endpoint).
 		WithResourceURI(epr.ResourceURI).
 		WithMessageID("uuid:" + uuid.New().String()).
+		WithSessionID(c.sessionID).
 		WithReplyTo(AddressAnonymous)
 
 	for _, s := range epr.Selectors {
