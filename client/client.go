@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"strings"
 	"sync"
@@ -165,6 +166,9 @@ type Client struct {
 	semaphore chan struct{} // Limits concurrent command execution
 	cmdMu     sync.Mutex    // Serializes command creation (NTLM auth requires this)
 
+	// Logging
+	slogLogger *slog.Logger
+
 	// File-based recovery state
 	outputFiles map[string]string // Maps PipelineID to remote file path
 }
@@ -186,6 +190,29 @@ type SessionState struct {
 	VMID        string            `json:"vm_id,omitempty"`
 	ServiceID   string            `json:"service_id,omitempty"`
 	OutputPaths map[string]string `json:"output_paths,omitempty"` // HvSocket file recovery paths
+}
+
+// SetSlogLogger sets the structured logger for the client and underlying components.
+func (c *Client) SetSlogLogger(logger *slog.Logger) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.slogLogger = logger.With("component", "client")
+
+	// Propagate to pool if already exists
+	if c.psrpPool != nil {
+		c.psrpPool.SetSlogLogger(logger)
+	}
+}
+
+// logf logs a debug message if a logger is configured.
+func (c *Client) logf(format string, v ...interface{}) {
+	c.mu.Lock()
+	logger := c.slogLogger
+	c.mu.Unlock()
+
+	if logger != nil {
+		logger.Debug(fmt.Sprintf(format, v...))
+	}
 }
 
 // ReconnectSession connects to an existing disconnected session using the provided state.
@@ -213,6 +240,7 @@ func (c *Client) ReconnectSession(ctx context.Context, state *SessionState) erro
 	}
 
 	// 2. Initialize Backend based on Transport
+	c.logf("ReconnectSession: Restoring transport %s", state.Transport)
 	switch state.Transport {
 	case "hvsocket": // TransportHvSocket string representation
 		// Update config to match state
@@ -256,6 +284,9 @@ func (c *Client) ReconnectSession(ctx context.Context, state *SessionState) erro
 		if c.psrpPool == nil {
 			transport := backend.Transport()
 			c.psrpPool = runspace.New(transport, c.poolID)
+			if c.slogLogger != nil {
+				c.psrpPool.SetSlogLogger(c.slogLogger)
+			}
 			if os.Getenv("PSRP_DEBUG") != "" {
 				c.psrpPool.EnableDebugLogging()
 			}
@@ -307,6 +338,9 @@ func (c *Client) ReconnectSession(ctx context.Context, state *SessionState) erro
 				t.SetContext(ctx)
 			}
 			c.psrpPool = runspace.New(transport, c.poolID)
+			if c.slogLogger != nil {
+				c.psrpPool.SetSlogLogger(c.slogLogger)
+			}
 			if os.Getenv("PSRP_DEBUG") != "" {
 				c.psrpPool.EnableDebugLogging()
 			}
@@ -584,6 +618,7 @@ func (c *Client) Connect(ctx context.Context) error {
 	// 1. Create Backend
 	// Note: We generate poolID here to pass to backend if needed (HvSocket needs it for Adapter)
 	c.poolID = uuid.New()
+	c.logf("Initializing new session with PoolID %s", c.poolID)
 
 	switch c.config.Transport {
 	case TransportHvSocket:
@@ -626,7 +661,12 @@ func (c *Client) Connect(ctx context.Context) error {
 	// We use the ID we generated earlier
 	c.psrpPool = runspace.New(transport, c.poolID)
 
-	// Enable debug logging if PSRP_DEBUG is set
+	// Propagate logger if configured
+	if c.slogLogger != nil {
+		c.psrpPool.SetSlogLogger(c.slogLogger)
+	}
+
+	// Enable debug logging if PSRP_DEBUG is set (legacy fallback)
 	if os.Getenv("PSRP_DEBUG") != "" {
 		c.psrpPool.EnableDebugLogging()
 	}
@@ -683,9 +723,16 @@ func (c *Client) Connect(ctx context.Context) error {
 
 // Disconnect disconnects the active session without closing it on the server.
 // This is useful for saving state and reconnecting later.
+func (c *Client) Disconnect() {
+	c.logf("Disconnect called")
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.connected = false
+}
 
 // Close closes the connection to the remote server.
 func (c *Client) Close(ctx context.Context) error {
+	c.logf("Close called")
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -752,6 +799,7 @@ type Result struct {
 // The script can be any valid PowerShell code.
 // Returns the output and any errors from execution.
 func (c *Client) Execute(ctx context.Context, script string) (*Result, error) {
+	c.logf("Execute called: '%s'", script)
 	c.mu.Lock()
 	if !c.connected {
 		c.mu.Unlock()

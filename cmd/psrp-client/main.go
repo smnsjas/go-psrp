@@ -28,6 +28,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
@@ -216,6 +217,13 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating client: %v\n", err)
 		os.Exit(1)
+	}
+
+	// Configure structured logging if requested
+	if *debug {
+		opts := &slog.HandlerOptions{Level: slog.LevelDebug}
+		logger := slog.New(slog.NewTextHandler(os.Stderr, opts))
+		psrp.SetSlogLogger(logger)
 	}
 
 	if *sessionID != "" {
