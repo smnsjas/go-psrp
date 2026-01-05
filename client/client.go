@@ -215,6 +215,13 @@ func (c *Client) logf(format string, v ...interface{}) {
 	}
 }
 
+// logfLocked logs a debug message assuming the client lock is already held.
+func (c *Client) logfLocked(format string, v ...interface{}) {
+	if c.slogLogger != nil {
+		c.slogLogger.Debug(fmt.Sprintf(format, v...))
+	}
+}
+
 // ReconnectSession connects to an existing disconnected session using the provided state.
 // This is the transport-agnostic version of Reconnect.
 func (c *Client) ReconnectSession(ctx context.Context, state *SessionState) error {
@@ -240,7 +247,7 @@ func (c *Client) ReconnectSession(ctx context.Context, state *SessionState) erro
 	}
 
 	// 2. Initialize Backend based on Transport
-	c.logf("ReconnectSession: Restoring transport %s", state.Transport)
+	c.logfLocked("ReconnectSession: Restoring transport %s", state.Transport)
 	switch state.Transport {
 	case "hvsocket": // TransportHvSocket string representation
 		// Update config to match state
@@ -618,7 +625,7 @@ func (c *Client) Connect(ctx context.Context) error {
 	// 1. Create Backend
 	// Note: We generate poolID here to pass to backend if needed (HvSocket needs it for Adapter)
 	c.poolID = uuid.New()
-	c.logf("Initializing new session with PoolID %s", c.poolID)
+	c.logfLocked("Initializing new session with PoolID %s", c.poolID)
 
 	switch c.config.Transport {
 	case TransportHvSocket:
