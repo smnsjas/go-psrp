@@ -202,7 +202,10 @@ func (m *MockPSRPTransport) queueMessage(msg *messages.Message) {
 	}
 	m.objectID++
 
-	fragBytes := frag.Encode()
+	fragBytes, err := frag.Encode()
+	if err != nil {
+		return // Should not happen with small test data
+	}
 	m.readBuf.Write(fragBytes)
 }
 
@@ -305,7 +308,11 @@ func TestMockPSRPTransport_GeneratesResponses(t *testing.T) {
 		Data:       msgBytes,
 	}
 
-	_, err = transport.Write(frag.Encode())
+	fragBytes, err := frag.Encode()
+	if err != nil {
+		t.Fatalf("Fragment.Encode failed: %v", err)
+	}
+	_, err = transport.Write(fragBytes)
 	if err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
