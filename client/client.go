@@ -333,8 +333,7 @@ func (c *Client) ReconnectSession(ctx context.Context, state *SessionState) erro
 			c.psrpPool = runspace.New(transport, c.poolID)
 			if c.slogLogger != nil {
 				c.psrpPool.SetSlogLogger(c.slogLogger)
-			}
-			if os.Getenv("PSRP_DEBUG") != "" {
+			} else if os.Getenv("PSRP_DEBUG") != "" {
 				c.psrpPool.EnableDebugLogging()
 			}
 		}
@@ -387,8 +386,7 @@ func (c *Client) ReconnectSession(ctx context.Context, state *SessionState) erro
 			c.psrpPool = runspace.New(transport, c.poolID)
 			if c.slogLogger != nil {
 				c.psrpPool.SetSlogLogger(c.slogLogger)
-			}
-			if os.Getenv("PSRP_DEBUG") != "" {
+			} else if os.Getenv("PSRP_DEBUG") != "" {
 				c.psrpPool.EnableDebugLogging()
 			}
 		}
@@ -711,10 +709,8 @@ func (c *Client) Connect(ctx context.Context) error {
 	// Propagate logger if configured
 	if c.slogLogger != nil {
 		c.psrpPool.SetSlogLogger(c.slogLogger)
-	}
-
-	// Enable debug logging if PSRP_DEBUG is set (legacy fallback)
-	if os.Getenv("PSRP_DEBUG") != "" {
+	} else if os.Getenv("PSRP_DEBUG") != "" {
+		// Enable debug logging if PSRP_DEBUG is set (legacy fallback)
 		c.psrpPool.EnableDebugLogging()
 	}
 
