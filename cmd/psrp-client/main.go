@@ -80,7 +80,7 @@ func main() {
 		os.Setenv("PSRP_DEBUG", "1")
 	}
 
-	fmt.Println("PSRP Client - Codebase Fix v3 (HvSocket Recover Fix)")
+	fmt.Println("PSRP Client - Codebase Fix v4 (Structured Logging)")
 
 	// Validate required flags
 	// If restoring session, we don't need server or vmid flags as they come from the state file
