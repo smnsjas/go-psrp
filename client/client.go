@@ -222,6 +222,46 @@ func (c *Client) logfLocked(format string, v ...interface{}) {
 	}
 }
 
+// logInfo logs an informational message (normal operations).
+func (c *Client) logInfo(format string, v ...interface{}) {
+	c.mu.Lock()
+	logger := c.slogLogger
+	c.mu.Unlock()
+
+	if logger != nil {
+		logger.Info(fmt.Sprintf(format, v...))
+	}
+}
+
+// logInfoLocked logs an informational message assuming the lock is already held.
+func (c *Client) logInfoLocked(format string, v ...interface{}) {
+	if c.slogLogger != nil {
+		c.slogLogger.Info(fmt.Sprintf(format, v...))
+	}
+}
+
+// logWarn logs a warning message (potential issues, recoverable).
+func (c *Client) logWarn(format string, v ...interface{}) {
+	c.mu.Lock()
+	logger := c.slogLogger
+	c.mu.Unlock()
+
+	if logger != nil {
+		logger.Warn(fmt.Sprintf(format, v...))
+	}
+}
+
+// logError logs an error message (failures that affect function).
+func (c *Client) logError(format string, v ...interface{}) {
+	c.mu.Lock()
+	logger := c.slogLogger
+	c.mu.Unlock()
+
+	if logger != nil {
+		logger.Error(fmt.Sprintf(format, v...))
+	}
+}
+
 // ReconnectSession connects to an existing disconnected session using the provided state.
 // This is the transport-agnostic version of Reconnect.
 func (c *Client) ReconnectSession(ctx context.Context, state *SessionState) error {
@@ -247,7 +287,7 @@ func (c *Client) ReconnectSession(ctx context.Context, state *SessionState) erro
 	}
 
 	// 2. Initialize Backend based on Transport
-	c.logfLocked("ReconnectSession: Restoring transport %s", state.Transport)
+	c.logInfoLocked("ReconnectSession: Restoring transport %s", state.Transport)
 	switch state.Transport {
 	case "hvsocket": // TransportHvSocket string representation
 		// Update config to match state
@@ -625,7 +665,7 @@ func (c *Client) Connect(ctx context.Context) error {
 	// 1. Create Backend
 	// Note: We generate poolID here to pass to backend if needed (HvSocket needs it for Adapter)
 	c.poolID = uuid.New()
-	c.logfLocked("Initializing new session with PoolID %s", c.poolID)
+	c.logInfoLocked("Initializing new session with PoolID %s", c.poolID)
 
 	switch c.config.Transport {
 	case TransportHvSocket:
@@ -733,7 +773,7 @@ func (c *Client) Connect(ctx context.Context) error {
 
 // Close closes the connection to the remote server.
 func (c *Client) Close(ctx context.Context) error {
-	c.logf("Close called")
+	c.logInfo("Close called")
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -800,7 +840,7 @@ type Result struct {
 // The script can be any valid PowerShell code.
 // Returns the output and any errors from execution.
 func (c *Client) Execute(ctx context.Context, script string) (*Result, error) {
-	c.logf("Execute called: '%s'", script)
+	c.logInfo("Execute called: '%s'", script)
 	c.mu.Lock()
 	if !c.connected {
 		c.mu.Unlock()
@@ -1175,7 +1215,7 @@ func (c *Client) ShellID() string {
 // The session remains running on the server and can be reconnected to later.
 // Note: This only works if the backend supports it (WSMan) or via dirty PSRP disconnect (HvSocket).
 func (c *Client) Disconnect(ctx context.Context) error {
-	c.logf("Disconnect called")
+	c.logInfo("Disconnect called")
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
