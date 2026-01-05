@@ -72,8 +72,13 @@ func main() {
 	asyncExec := flag.Bool("async", false, "Start command and disconnect immediately (fire-and-forget)")
 	saveSession := flag.String("save-session", "", "Save session state to file on disconnect/exit")
 	restoreSession := flag.String("restore-session", "", "Restore session state from file")
+	debug := flag.Bool("debug", false, "Enable debug logging")
 
 	flag.Parse()
+
+	if *debug {
+		os.Setenv("PSRP_DEBUG", "1")
+	}
 
 	fmt.Println("PSRP Client - Codebase Fix v3 (HvSocket Recover Fix)")
 
