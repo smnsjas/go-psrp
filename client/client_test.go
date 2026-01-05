@@ -234,3 +234,69 @@ func TestSaveLoadState(t *testing.T) {
 		t.Errorf("ServiceID = %q, want Microsoft.PowerShell", state.ServiceID)
 	}
 }
+
+// TestClient_ShellID verifies the ShellID accessor.
+func TestClient_ShellID(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Username = testUsername
+	cfg.Password = testPassword
+
+	client, _ := New("testserver", cfg)
+
+	// Without backend, should return empty string
+	if got := client.ShellID(); got != "" {
+		t.Errorf("ShellID without backend = %q, want empty", got)
+	}
+}
+
+// TestClient_PoolID verifies PoolID accessor.
+func TestClient_PoolID(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Username = testUsername
+	cfg.Password = testPassword
+
+	client, _ := New("testserver", cfg)
+
+	// Initial pool ID is nil UUID
+	if got := client.PoolID(); got != "00000000-0000-0000-0000-000000000000" {
+		t.Errorf("PoolID = %q, want nil UUID", got)
+	}
+}
+
+// TestClient_SetPoolID verifies SetPoolID setter.
+func TestClient_SetPoolID(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Username = testUsername
+	cfg.Password = testPassword
+
+	client, _ := New("testserver", cfg)
+
+	// Set valid pool ID
+	validID := "12345678-1234-5678-1234-567812345678"
+	if err := client.SetPoolID(validID); err != nil {
+		t.Errorf("SetPoolID failed: %v", err)
+	}
+
+	if got := client.PoolID(); got != validID {
+		t.Errorf("PoolID after set = %q, want %q", got, validID)
+	}
+
+	// Set invalid pool ID
+	if err := client.SetPoolID("invalid-uuid"); err == nil {
+		t.Error("expected error for invalid UUID")
+	}
+}
+
+// TestClient_IsConnected verifies IsConnected status.
+func TestClient_IsConnected(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Username = testUsername
+	cfg.Password = testPassword
+
+	client, _ := New("testserver", cfg)
+
+	// Not connected initially
+	if client.IsConnected() {
+		t.Error("expected IsConnected = false initially")
+	}
+}

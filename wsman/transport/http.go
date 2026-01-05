@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 )
@@ -109,6 +110,9 @@ func WithTimeout(d time.Duration) HTTPTransportOption {
 // WARNING: Only use this for testing. Never use in production.
 func WithInsecureSkipVerify(skip bool) HTTPTransportOption {
 	return func(t *HTTPTransport) {
+		if skip {
+			fmt.Fprintf(os.Stderr, "WARNING: TLS certificate verification disabled. This is insecure and should only be used for testing.\n")
+		}
 		transport := t.ensureHTTPTransport()
 		if transport.TLSClientConfig == nil {
 			transport.TLSClientConfig = &tls.Config{

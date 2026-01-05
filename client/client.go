@@ -2,6 +2,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/binary"
@@ -154,8 +155,19 @@ type Client struct {
 	endpoint string
 
 	transport *transport.HTTPTransport
-	wsman     *wsman.Client
-	backend   powershell.RunspaceBackend
+	// wsman is the underlying WSMan client (for WSMan transport)
+	wsman *wsman.Client
+
+	// Message fragmentation
+	fragmentBuffer bytes.Buffer
+
+	// backend is the PSRP transport backend (WSMan or HvSocket).
+	backend powershell.RunspaceBackend
+
+	// backendFactory is an internal hook for testing to inject a mock backend.
+	backendFactory func() (powershell.RunspaceBackend, error)
+
+	// psrpPool is the PSRP RunspacePool state machine.
 	psrpPool  *runspace.Pool
 	poolID    uuid.UUID
 	connected bool
@@ -703,27 +715,35 @@ func (c *Client) Connect(ctx context.Context) error {
 	c.poolID = uuid.New()
 	c.logInfoLocked("Initializing new session with PoolID %s", c.poolID)
 
-	switch c.config.Transport {
-	case TransportHvSocket:
-		// Convert VMID
-		vmID, _ := uuid.Parse(c.config.VMID) // Validated in New/Validate but parse again or store in Client?
-		// New was creating Client. Config has string.
-		// We'll parse again.
-
-		c.backend = powershell.NewHvSocketBackend(
-			vmID,
-			c.config.Domain,
-			c.config.Username,
-			c.config.Password,
-			c.config.ConfigurationName,
-			c.poolID,
-		)
-	default: // WSMan
-		// Ensure wsman client is set (it should be from New)
-		if c.wsman == nil {
-			return fmt.Errorf("wsman client not initialized")
+	if c.backendFactory != nil {
+		var err error
+		c.backend, err = c.backendFactory()
+		if err != nil {
+			return fmt.Errorf("create backend from factory: %w", err)
 		}
-		c.backend = powershell.NewWSManBackend(c.wsman, powershell.NewWSManTransport(nil, nil, ""))
+	} else {
+		switch c.config.Transport {
+		case TransportHvSocket:
+			// Convert VMID
+			vmID, _ := uuid.Parse(c.config.VMID) // Validated in New/Validate but parse again or store in Client?
+			// New was creating Client. Config has string.
+			// We'll parse again.
+
+			c.backend = powershell.NewHvSocketBackend(
+				vmID,
+				c.config.Domain,
+				c.config.Username,
+				c.config.Password,
+				c.config.ConfigurationName,
+				c.poolID,
+			)
+		default: // WSMan
+			// Ensure wsman client is set (it should be from New)
+			if c.wsman == nil {
+				return fmt.Errorf("wsman client not initialized")
+			}
+			c.backend = powershell.NewWSManBackend(c.wsman, powershell.NewWSManTransport(nil, nil, ""))
+		}
 	}
 
 	// 2. Connect Backend (Prepare Transport)
@@ -939,6 +959,7 @@ func (c *Client) Execute(ctx context.Context, script string) (*Result, error) {
 		}
 
 		// Invoke the pipeline (transitions PSRP state)
+		// psrpPipeline.SkipInvokeSend() // Using SkipInvokeSend if implemented in core
 		if err = psrpPipeline.Invoke(ctx); err != nil {
 			cleanup()
 			if strings.Contains(err.Error(), "401 Unauthorized") {
@@ -1096,29 +1117,99 @@ func (c *Client) ExecuteAsync(ctx context.Context, script string) (string, error
 		var errOutput []string
 		var wg sync.WaitGroup
 
-		// Drain channels to prevent blocking
+		// Create cancellation context to prevent leaks on timeout/return
+		ctx, cancel := context.WithCancel(ctx)
+		defer cancel()
+
+		// Capture errors and drain other channels
+		wg.Add(6)
+
+		// Simply use a loop for each to start goroutines, but we need type specific handling or just interface{} channels?
+		// No, the channels are strongly typed.
+		// Let's just write the goroutines explicitly but safely.
+
+		// Drain Output (messages)
 		go func() {
-			for range psrpPipeline.Output() {
+			defer wg.Done()
+			for {
+				select {
+				case _, ok := <-psrpPipeline.Output():
+					if !ok {
+						return
+					}
+				case <-ctx.Done():
+					return
+				}
 			}
 		}()
+		// Drain Warning
 		go func() {
-			for range psrpPipeline.Warning() {
+			defer wg.Done()
+			for {
+				select {
+				case _, ok := <-psrpPipeline.Warning():
+					if !ok {
+						return
+					}
+				case <-ctx.Done():
+					return
+				}
 			}
 		}()
+		// Drain Verbose
 		go func() {
-			for range psrpPipeline.Verbose() {
+			defer wg.Done()
+			for {
+				select {
+				case _, ok := <-psrpPipeline.Verbose():
+					if !ok {
+						return
+					}
+				case <-ctx.Done():
+					return
+				}
 			}
 		}()
+		// Drain Debug
 		go func() {
-			for range psrpPipeline.Debug() {
+			defer wg.Done()
+			for {
+				select {
+				case _, ok := <-psrpPipeline.Debug():
+					if !ok {
+						return
+					}
+				case <-ctx.Done():
+					return
+				}
 			}
 		}()
+		// Drain Progress
 		go func() {
-			for range psrpPipeline.Progress() {
+			defer wg.Done()
+			for {
+				select {
+				case _, ok := <-psrpPipeline.Progress():
+					if !ok {
+						return
+					}
+				case <-ctx.Done():
+					return
+				}
 			}
 		}()
+		// Drain Information
 		go func() {
-			for range psrpPipeline.Information() {
+			defer wg.Done()
+			for {
+				select {
+				case _, ok := <-psrpPipeline.Information():
+					if !ok {
+						return
+					}
+				case <-ctx.Done():
+					return
+				}
 			}
 		}()
 
@@ -1126,12 +1217,23 @@ func (c *Client) ExecuteAsync(ctx context.Context, script string) (string, error
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for err := range psrpPipeline.Error() {
-				errOutput = append(errOutput, fmt.Sprintf("%v", err))
+			for {
+				select {
+				case err, ok := <-psrpPipeline.Error():
+					if !ok {
+						return
+					}
+					errOutput = append(errOutput, fmt.Sprintf("%v", err))
+				case <-ctx.Done():
+					return
+				}
 			}
 		}()
 
-		// Wait for streams to close
+		// Wait for streams to close or context cancel
+		// We need to handle the case where Wait() blocks forever if streams don't close.
+		// But Wait() below waits on WaitGroup.
+		// If ctx is cancelled, all goroutines return, so wg.Wait() returns.
 		wg.Wait()
 
 		// Wait for pipeline state completion
@@ -1212,24 +1314,30 @@ func (c *Client) runPipelineReceive(ctx context.Context, transport io.Reader, pl
 		// Parse the PSRP message from the fragment
 		// Fragment flags: bit 0 = start, bit 1 = end
 		flags := header[16]
-		isStart := flags&0x01 != 0
-		isEnd := flags&0x02 != 0 // Assuming bit 1 is for 'end' based on common patterns
+		isStart := flags&1 != 0
+		isEnd := flags&2 != 0
 
-		// For now, assume single-fragment messages (most common case)
-		// TODO: Handle multi-fragment messages by accumulating blobs
-		if isStart && isEnd && len(blob) > 0 {
-			// Full message - parse and dispatch
-			msg, err := messages.Decode(blob)
+		if isStart {
+			c.fragmentBuffer.Reset()
+		}
+		c.fragmentBuffer.Write(blob)
+
+		if isEnd {
+			// Full message collected
+
+			// Parse and dispatch
+			msg, err := messages.Decode(c.fragmentBuffer.Bytes())
 			if err != nil {
-				// Skip unparseable messages
-				continue
-			}
-
-			// Feed to pipeline via HandleMessage
-			if err := pl.HandleMessage(msg); err != nil {
-				// HandleMessage failed - pipeline might be done
+				pl.Fail(fmt.Errorf("decode message: %w", err))
 				return
 			}
+
+			if err := pl.HandleMessage(msg); err != nil {
+				pl.Fail(fmt.Errorf("handle message: %w", err))
+				return
+			}
+			// Reset buffer to free memory (optional, but good practice)
+			c.fragmentBuffer.Reset()
 		}
 	}
 }
@@ -1291,7 +1399,10 @@ func (c *Client) Reconnect(ctx context.Context, shellID string) error {
 	}
 
 	// 2. Determine backend type and call Reattach
-	if wsmanBackend, ok := c.backend.(*powershell.WSManBackend); ok {
+	type ReattachableBackend interface {
+		Reattach(ctx context.Context, pool *runspace.Pool, shellID string) error
+	}
+	if reattachable, ok := c.backend.(ReattachableBackend); ok {
 		// Use the new Reattach method
 		// We need to create the pool first if it doesn't exist?
 		// Reattach takes a pool argument.
@@ -1311,7 +1422,7 @@ func (c *Client) Reconnect(ctx context.Context, shellID string) error {
 			}
 		}
 
-		if err := wsmanBackend.Reattach(ctx, c.psrpPool, shellID); err != nil {
+		if err := reattachable.Reattach(ctx, c.psrpPool, shellID); err != nil {
 			return fmt.Errorf("backend reattach: %w", err)
 		}
 		c.connected = true

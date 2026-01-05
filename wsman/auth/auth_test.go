@@ -127,3 +127,92 @@ func TestAuthenticator_Interface(_ *testing.T) {
 	var _ Authenticator = NewBasicAuth(Credentials{})
 	var _ Authenticator = NewNTLMAuth(Credentials{})
 }
+
+func TestCredentials_Validate(t *testing.T) {
+	tests := []struct {
+		name    string
+		creds   Credentials
+		wantErr bool
+	}{
+		{
+			name: "valid_user_pass",
+			creds: Credentials{
+				Username: "user",
+				Password: "pass",
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid_domain_user_pass",
+			creds: Credentials{
+				Username: "user",
+				Password: "pass",
+				Domain:   "domain",
+			},
+			wantErr: false,
+		},
+		{
+			name: "missing_username",
+			creds: Credentials{
+				Username: "",
+				Password: "pass",
+			},
+			wantErr: true,
+		},
+		{
+			name: "missing_password_basic",
+			creds: Credentials{
+				Username: "user",
+				Password: "",
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.creds.Validate(); (err != nil) != tt.wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestCredentials_ValidateForKerberos(t *testing.T) {
+	tests := []struct {
+		name    string
+		creds   Credentials
+		wantErr bool
+	}{
+		{
+			name: "valid_kerb",
+			creds: Credentials{
+				Username: "user",
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid_kerb_with_pass",
+			creds: Credentials{
+				Username: "user",
+				Password: "pass",
+			},
+			wantErr: false,
+		},
+		{
+			name: "missing_username",
+			creds: Credentials{
+				Username: "",
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.creds.ValidateForKerberos(); (err != nil) != tt.wantErr {
+				t.Errorf("ValidateForKerberos() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}

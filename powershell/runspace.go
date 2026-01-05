@@ -264,11 +264,18 @@ func (b *WSManBackend) PreparePipeline(ctx context.Context, p *pipeline.Pipeline
 	pipelineTransport.SetContext(ctx)
 
 	// 3. Setup cleanup function
+	// 3. Setup cleanup function
 	cleanup := func() {
 		// Terminate the command on WSMan side
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		// Use parent context with timeout ensuring we respect parent cancellation
+		// while allowing a grace period for cleanup if parent isn't cancelled.
+		// If parent IS cancelled, we still want to try to cleanup contextually,
+		// but standard practice requested by user is to bind to parent.
+		// User report: "If the parent operation is cancelled, cleanup still waits the full 10 seconds. This causes shutdown delays."
+		// So we derive from ctx.
+		cleanCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
-		_ = b.client.Signal(ctx, b.epr, returnedID, wsman.SignalTerminate)
+		_ = b.client.Signal(cleanCtx, b.epr, returnedID, wsman.SignalTerminate)
 	}
 
 	// 4. Skip PSRP Invoke Send

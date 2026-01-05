@@ -48,9 +48,6 @@ type ReceiveResult struct {
 // Create creates a new shell (RunspacePool) and returns the EndpointReference.
 // For PowerShell remoting, creationXml should contain base64-encoded PSRP fragments
 // (SessionCapability + InitRunspacePool messages).
-// Create creates a new shell (RunspacePool) and returns the EndpointReference.
-// For PowerShell remoting, creationXml should contain base64-encoded PSRP fragments
-// (SessionCapability + InitRunspacePool messages).
 func (c *Client) Create(ctx context.Context, options map[string]string, creationXML string) (*EndpointReference, error) {
 	env := NewEnvelope().
 		WithAction(ActionCreate).
@@ -94,9 +91,6 @@ func (c *Client) Create(ctx context.Context, options map[string]string, creation
 </rsp:Shell>`
 	}
 	env.WithBody([]byte(shellBody))
-
-	// Debug logging
-	// fmt.Fprintf(os.Stderr, "DEBUG: Sending Create Request for suggested ShellID: %s\n", shellID)
 
 	respBody, err := c.sendEnvelope(ctx, env)
 	if err != nil {

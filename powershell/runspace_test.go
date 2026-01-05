@@ -2,9 +2,13 @@ package powershell
 
 import (
 	"context"
+	"errors"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/smnsjas/go-psrp/wsman"
+	"github.com/smnsjas/go-psrpcore/pipeline"
+	"github.com/smnsjas/go-psrpcore/runspace"
 )
 
 // mockWSManClientForPool implements PoolClient for tests.
@@ -120,5 +124,123 @@ func TestWSManBackend_NotOpened(t *testing.T) {
 	err := backend.Close(ctx)
 	if err != ErrPoolNotOpened {
 		t.Errorf("Close on unopened pool: got %v, want ErrPoolNotOpened", err)
+	}
+}
+
+// TestWSManBackend_Init_CreateError verifies Init handles Create failure.
+func TestWSManBackend_Init_CreateError(t *testing.T) {
+	expectedErr := errors.New("create failed")
+	mock := &mockWSManClientForPool{
+		createErr: expectedErr,
+	}
+	transport := NewWSManTransport(mock, nil, "")
+	backend := NewWSManBackend(mock, transport)
+
+	// Create a dummy pool (we need a valid pool to call GetHandshakeFragments)
+	// runspace.New requires transport and poolID
+	pool := runspace.New(transport, uuid.New())
+
+	ctx := context.Background()
+	err := backend.Init(ctx, pool)
+	if err == nil {
+		t.Error("Init expected error, got nil")
+	}
+	if err != expectedErr {
+		t.Errorf("Init error = %v, want %v", err, expectedErr)
+	}
+}
+
+// TestWSManBackend_PreparePipeline verifies command creation and cleanup.
+func TestWSManBackend_PreparePipeline(t *testing.T) {
+	mock := &mockWSManClientForPool{
+		createEPR: dummyPoolEPR(),
+	}
+	transport := NewWSManTransport(mock, nil, "")
+	backend := NewWSManBackend(mock, transport)
+
+	// Manually open
+	backend.opened = true
+	backend.epr = dummyPoolEPR()
+
+	// Dummy pipeline
+	pl := pipeline.New(nil, uuid.New(), "echo test")
+	ctx := context.Background()
+
+	// Call PreparePipeline
+	pTransport, cleanup, err := backend.PreparePipeline(ctx, pl, "payload")
+	if err != nil {
+		t.Fatalf("PreparePipeline failed: %v", err)
+	}
+	if pTransport == nil {
+		t.Error("Returned transport is nil")
+	}
+	if cleanup == nil {
+		t.Error("Returned cleanup is nil")
+	}
+
+	// Verify cleanup calls Signal
+	cleanup()
+}
+
+func TestWSManBackend_Disconnect(t *testing.T) {
+	mock := &mockWSManClientForPool{
+		createEPR: dummyPoolEPR(),
+	}
+	transport := NewWSManTransport(mock, nil, "")
+	backend := NewWSManBackend(mock, transport)
+
+	// Manually open
+	backend.opened = true
+	backend.epr = dummyPoolEPR()
+
+	ctx := context.Background()
+	err := backend.Disconnect(ctx)
+	if err != nil {
+		t.Fatalf("Disconnect failed: %v", err)
+	}
+
+	if !backend.closed {
+		t.Error("Backend should be closed after Disconnect")
+	}
+
+	// Double disconnect
+	err = backend.Disconnect(ctx)
+	if err != ErrPoolClosed {
+		t.Errorf("Double Disconnect error = %v, want ErrPoolClosed", err)
+	}
+}
+
+func TestWSManBackend_Reconnect(t *testing.T) {
+	mock := &mockWSManClientForPool{}
+	transport := NewWSManTransport(mock, nil, "")
+	backend := NewWSManBackend(mock, transport)
+
+	err := backend.Reconnect(context.Background(), "shell-id")
+	if err != nil {
+		t.Fatalf("Reconnect failed: %v", err)
+	}
+}
+
+func TestWSManBackend_Reattach(t *testing.T) {
+	mock := &mockWSManClientForPool{
+		createEPR: dummyPoolEPR(),
+	}
+	transport := NewWSManTransport(mock, nil, "")
+	backend := NewWSManBackend(mock, transport)
+
+	// dummy pool
+	pool := runspace.New(transport, uuid.New())
+
+	ctx := context.Background()
+	err := backend.Reattach(ctx, pool, "shell-id")
+	if err != nil {
+		t.Fatalf("Reattach failed: %v", err)
+	}
+
+	if !backend.opened {
+		t.Error("Backend should be opened after Reattach")
+	}
+	if backend.ShellID() != "shell-id" {
+		t.Errorf("ShellID = %s, want shell-id", backend.ShellID())
 	}
 }
