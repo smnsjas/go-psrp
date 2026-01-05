@@ -723,12 +723,6 @@ func (c *Client) Connect(ctx context.Context) error {
 
 // Disconnect disconnects the active session without closing it on the server.
 // This is useful for saving state and reconnecting later.
-func (c *Client) Disconnect() {
-	c.logf("Disconnect called")
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.connected = false
-}
 
 // Close closes the connection to the remote server.
 func (c *Client) Close(ctx context.Context) error {
@@ -1174,6 +1168,7 @@ func (c *Client) ShellID() string {
 // The session remains running on the server and can be reconnected to later.
 // Note: This only works if the backend supports it (WSMan) or via dirty PSRP disconnect (HvSocket).
 func (c *Client) Disconnect(ctx context.Context) error {
+	c.logf("Disconnect called")
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
