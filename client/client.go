@@ -1099,7 +1099,7 @@ func (c *Client) Execute(ctx context.Context, script string) (*Result, error) {
 	for i := 0; i < 3; i++ {
 		pipelineTransport, cleanup, err = backend.PreparePipeline(ctx, psrpPipeline, payload)
 		if err != nil {
-			if strings.Contains(err.Error(), "401 Unauthorized") {
+			if errors.Is(err, transport.ErrUnauthorized) {
 				// NTLM negotiation race, retry
 				continue
 			}
@@ -1111,7 +1111,7 @@ func (c *Client) Execute(ctx context.Context, script string) (*Result, error) {
 		// psrpPipeline.SkipInvokeSend() // Using SkipInvokeSend if implemented in core
 		if err = psrpPipeline.Invoke(ctx); err != nil {
 			cleanup()
-			if strings.Contains(err.Error(), "401 Unauthorized") {
+			if errors.Is(err, transport.ErrUnauthorized) {
 				continue
 			}
 			c.cmdMu.Unlock()

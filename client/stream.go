@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strings"
 
+	"github.com/smnsjas/go-psrp/wsman/transport"
 	"github.com/smnsjas/go-psrpcore/messages"
 	"github.com/smnsjas/go-psrpcore/pipeline"
 )
@@ -97,7 +97,7 @@ func (c *Client) ExecuteStream(ctx context.Context, script string) (*StreamResul
 	for i := 0; i < 3; i++ {
 		pipelineTransport, cleanupBackend, err = backend.PreparePipeline(ctx, psrpPipeline, payload)
 		if err != nil {
-			if strings.Contains(err.Error(), "401 Unauthorized") {
+			if errors.Is(err, transport.ErrUnauthorized) {
 				continue
 			}
 			c.cmdMu.Unlock()
@@ -109,7 +109,7 @@ func (c *Client) ExecuteStream(ctx context.Context, script string) (*StreamResul
 		if err = psrpPipeline.Invoke(ctx); err != nil {
 			c.cmdMu.Unlock()
 			cleanupBackend()
-			if strings.Contains(err.Error(), "401 Unauthorized") {
+			if errors.Is(err, transport.ErrUnauthorized) {
 				continue
 			}
 			<-semaphore

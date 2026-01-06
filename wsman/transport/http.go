@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +12,10 @@ import (
 	"sync"
 	"time"
 )
+
+// ErrUnauthorized is returned when the server responds with 401 Unauthorized.
+// Use errors.Is(err, ErrUnauthorized) to check for authentication failures.
+var ErrUnauthorized = errors.New("transport: authentication failed (401 Unauthorized)")
 
 const (
 	// ContentTypeSOAP is the content type for SOAP 1.2 messages.
@@ -171,7 +176,7 @@ func (t *HTTPTransport) Post(ctx context.Context, url string, body []byte) ([]by
 
 	// Check HTTP status code
 	if resp.StatusCode == http.StatusUnauthorized {
-		return nil, fmt.Errorf("transport: authentication failed (401 Unauthorized)")
+		return nil, ErrUnauthorized
 	}
 	if resp.StatusCode == http.StatusForbidden {
 		return nil, fmt.Errorf("transport: access denied (403 Forbidden)")
