@@ -46,6 +46,8 @@ type WSManBackend struct {
 	opened    bool
 	closed    bool
 	transport *WSManTransport // Reference to the transport for configuration
+	// idleTimeout is the WSMan shell idle timeout (ISO8601 duration string).
+	idleTimeout string
 }
 
 // NewWSManBackend creates a new WSManBackend using the given WSMan client.
@@ -54,6 +56,13 @@ func NewWSManBackend(client PoolClient, transport *WSManTransport) *WSManBackend
 		client:    client,
 		transport: transport,
 	}
+}
+
+// SetIdleTimeout sets the WSMan shell idle timeout (ISO8601 duration, e.g. "PT30M").
+func (b *WSManBackend) SetIdleTimeout(duration string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.idleTimeout = duration
 }
 
 // ShellID returns the WSMan shell ID for this pool.
@@ -104,6 +113,9 @@ func (b *WSManBackend) Init(ctx context.Context, pool *runspace.Pool) error {
 	options := map[string]string{
 		"protocolversion": "2.3",
 	}
+	if b.idleTimeout != "" {
+		options["IdleTimeout"] = b.idleTimeout
+	}
 
 	epr, err := b.client.Create(ctx, options, creationXML)
 	if err != nil {
@@ -152,6 +164,13 @@ func (b *WSManBackend) Close(ctx context.Context) error {
 
 	b.closed = true
 	return nil
+}
+
+// SupportsPSRPKeepalive returns false for WSMan.
+// WSMan uses WS-MAN level keepalive via WSMAN_CMDSHELL_OPTION_KEEPALIVE on Receive operations,
+// not PSRP-level GET_AVAILABLE_RUNSPACES messages.
+func (b *WSManBackend) SupportsPSRPKeepalive() bool {
+	return false
 }
 
 // PreparePipeline creates the WSMan command and returns a per-pipeline transport.

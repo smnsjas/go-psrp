@@ -74,6 +74,8 @@ func main() {
 	saveSession := flag.String("save-session", "", "Save session state to file on disconnect/exit")
 	restoreSession := flag.String("restore-session", "", "Restore session state from file")
 	logLevel := flag.String("loglevel", "", "Log level: debug, info, warn, error (empty = no logging)")
+	keepAlive := flag.Duration("keepalive", 0, "Keepalive interval (e.g. 30s). 0 to disable.")
+	idleTimeout := flag.String("idle-timeout", "", "WSMan shell idle timeout (ISO8601 duration, e.g. PT1H, PT30M)")
 
 	flag.Parse()
 
@@ -173,6 +175,9 @@ func main() {
 	cfg.UseTLS = *useTLS
 	cfg.InsecureSkipVerify = *insecure
 	cfg.Timeout = *timeout
+	cfg.Timeout = *timeout
+	cfg.KeepAliveInterval = *keepAlive
+	cfg.IdleTimeout = *idleTimeout
 
 	// Kerberos settings apply to both AuthNegotiate (default) and explicit -kerberos
 	cfg.Realm = *realm

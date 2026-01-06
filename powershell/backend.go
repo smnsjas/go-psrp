@@ -41,4 +41,10 @@ type RunspaceBackend interface {
 	// Reattach connects to an existing PSRP runspace pool (persistence).
 	// shellID: For WSMan, this is the existing ShellID. For HvSocket, it may be ignored or validated.
 	Reattach(ctx context.Context, pool *runspace.Pool, shellID string) error
+
+	// SupportsPSRPKeepalive returns true if the backend supports PSRP-level keepalive
+	// (GET_AVAILABLE_RUNSPACES messages). WSMan does NOT support this; it uses
+	// WS-MAN level keepalive via WSMAN_CMDSHELL_OPTION_KEEPALIVE on Receive operations.
+	// HvSocket and OutOfProc transports DO support PSRP-level keepalive.
+	SupportsPSRPKeepalive() bool
 }

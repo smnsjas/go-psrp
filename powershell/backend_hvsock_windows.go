@@ -148,6 +148,12 @@ func (b *HvSocketBackend) PreparePipeline(ctx context.Context, p *pipeline.Pipel
 	return nil, func() {}, nil
 }
 
+// SupportsPSRPKeepalive returns true for HvSocket.
+// HvSocket uses OUT-OF-PROC transport which supports PSRP-level keepalive messages.
+func (b *HvSocketBackend) SupportsPSRPKeepalive() bool {
+	return true
+}
+
 func (b *HvSocketBackend) Close(ctx context.Context) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()

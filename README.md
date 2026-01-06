@@ -49,6 +49,7 @@ This library builds on [go-psrpcore](https://github.com/smnsjas/go-psrpcore) by 
   - Kerberos (pure Go via gokrb5, cross-platform)
   - Windows SSPI (native Negotiate/Kerberos on Windows)
 - **Full PSRP Support** - RunspacePools, Pipelines, Output streams
+- **Resilient** - Built-in keepalive support (transport-aware) and configurable idle timeouts
 - **High-Level API** - Simple command execution
 - **Secure** - TLS 1.2+ by default, pure Go implementation
 
@@ -169,6 +170,25 @@ cfg.AuthType = client.AuthNegotiate  // Uses Windows SSPI on Windows
 cfg.UseTLS = true
 ```
 
+### Keepalive & Timeouts
+
+Configure session timeouts and keepalive mechanism:
+
+```go
+cfg := client.DefaultConfig()
+// ... auth settings ...
+
+// How often to send PSRP keepalive messages (default: 0/disabled)
+// Recommended for long-running scripts on HvSocket or unstable networks.
+// (For WSMan, this is disabled as it uses protocol-level keepalives)
+cfg.KeepAliveInterval = 30 * time.Second
+
+// WSMan Shell Idle Timeout (ISO8601 duration string)
+// Defaults to "PT30M" (30 minutes) if unset.
+// Example: Set to 1 hour
+cfg.IdleTimeout = "PT1H"
+```
+
 ## Logging
 
  This library enables structured logging (DEBUG, INFO, WARN, ERROR) for both the client logic and the underlying PSRP protocol.
@@ -239,6 +259,8 @@ go build ./cmd/psrp-client
 | `-domain` | Domain for HVSocket auth | `.` |
 | `-configname` | PowerShell configuration name | - |
 | `-loglevel` | Log level (`debug`, `info`, `warn`, `error`) | - |
+| `-keepalive` | PSRP Keepalive interval (e.g., `30s`) | `0` (disabled) |
+| `-idle-timeout` | WSMan Shell idle timeout (ISO8601, e.g. `PT1H`) | `PT30M` |
 | `-list-sessions` | List disconnected sessions on server | `false` |
 | `-cleanup` | Cleanup (remove) disconnected sessions | `false` |
 | `-recover` | Recover output from pipeline with CommandID | - |

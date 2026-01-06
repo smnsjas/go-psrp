@@ -102,6 +102,16 @@ type Config struct {
 	// MaxConcurrentCommands limits the number of concurrent pipeline executions.
 	// Default: 5. Set to 1 to disable concurrent execution.
 	MaxConcurrentCommands int
+
+	// KeepAliveInterval specifies the interval for sending PSRP keepalive messages
+	// (GET_AVAILABLE_RUNSPACES) to maintain session health and prevent timeouts.
+	// If 0, keepalive is disabled.
+	KeepAliveInterval time.Duration
+
+	// IdleTimeout specifies the WSMan shell idle timeout as an ISO8601 duration string (e.g., "PT1H").
+	// If empty, defaults to "PT30M" (30 minutes).
+	// Only applies to WSMan transport.
+	IdleTimeout string
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -183,6 +193,10 @@ type Client struct {
 
 	// File-based recovery state
 	outputFiles map[string]string // Maps PipelineID to remote file path
+
+	// Keepalive management
+	keepAliveDone chan struct{}
+	keepAliveWg   sync.WaitGroup
 }
 
 // SessionState represents the serialized state of a client session
@@ -742,9 +756,14 @@ func (c *Client) Connect(ctx context.Context) error {
 			if c.wsman == nil {
 				return fmt.Errorf("wsman client not initialized")
 			}
-			c.backend = powershell.NewWSManBackend(c.wsman, powershell.NewWSManTransport(nil, nil, ""))
+			backend := powershell.NewWSManBackend(c.wsman, powershell.NewWSManTransport(nil, nil, ""))
+			if c.config.IdleTimeout != "" {
+				backend.SetIdleTimeout(c.config.IdleTimeout)
+			}
+			c.backend = backend
 		}
 	}
+	c.logInfoLocked("Connecting backend...")
 
 	// 2. Connect Backend (Prepare Transport)
 	if err := c.backend.Connect(ctx); err != nil {
@@ -783,6 +802,7 @@ func (c *Client) Connect(ctx context.Context) error {
 	_ = c.psrpPool.SetMaxRunspaces(maxRunspaces)
 
 	// 5. Init Backend
+	c.logInfoLocked("Initializing backend...")
 	if err := c.backend.Init(ctx, c.psrpPool); err != nil {
 		return fmt.Errorf("init backend: %w", err)
 	}
@@ -799,8 +819,11 @@ func (c *Client) Connect(ctx context.Context) error {
 	// Note: We need the ShellID from the backend
 	// TODO: Add ShellID() to RunspaceBackend interface? Yes, we did.
 	if wsmanBackend, ok := c.backend.(*powershell.WSManBackend); ok {
+		c.logInfoLocked("Draining initial receive...")
 		if epr := wsmanBackend.EPR(); epr != nil {
+			c.logfLocked("Performing receive on shell EPR...")
 			_, _ = c.wsman.Receive(drainCtx, epr, "")
+			c.logfLocked("Shell receive completed/timed out")
 		}
 	}
 
@@ -819,6 +842,17 @@ func (c *Client) Connect(ctx context.Context) error {
 	}
 	c.semaphore = make(chan struct{}, maxConcurrent)
 
+	// Start keepalive loop if configured AND supported by the backend.
+	// WSMan uses WS-MAN level keepalive on Receive operations instead.
+	if c.config.KeepAliveInterval > 0 && c.backend.SupportsPSRPKeepalive() {
+		c.logInfoLocked("Starting keepalive loop (Interval: %v)", c.config.KeepAliveInterval)
+		c.startKeepaliveLocked()
+	} else if c.config.KeepAliveInterval > 0 {
+		c.logInfoLocked("PSRP keepalive disabled for this transport (using WS-MAN level keepalive)")
+	} else {
+		c.logInfoLocked("Keepalive disabled")
+	}
+
 	return nil
 }
 
@@ -829,22 +863,35 @@ func (c *Client) Connect(ctx context.Context) error {
 func (c *Client) Close(ctx context.Context) error {
 	c.logInfo("Close called")
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	if c.closed {
+		c.mu.Unlock()
 		return nil
 	}
-
 	c.closed = true
 
+	// Stop keepalive loop (signal only)
+	if c.keepAliveDone != nil {
+		close(c.keepAliveDone)
+		c.keepAliveDone = nil
+	}
+
+	// Read fields needed for cleanup
+	pool := c.psrpPool
+	backend := c.backend
+	connected := c.connected
+	c.mu.Unlock()
+
+	// Wait for keepalive goroutine to exit (outside lock)
+	c.keepAliveWg.Wait()
+
 	// First close the runspace pool (sends RUNSPACEPOOL_STATE=Closed message)
-	if c.psrpPool != nil {
-		_ = c.psrpPool.Close(ctx)
+	if pool != nil {
+		_ = pool.Close(ctx)
 	}
 
 	// Then close the backend (sends transport-level Close and closes connection)
-	if c.backend != nil && c.connected {
-		if err := c.backend.Close(ctx); err != nil {
+	if backend != nil && connected {
+		if err := backend.Close(ctx); err != nil {
 			return fmt.Errorf("close backend: %w", err)
 		}
 	}
@@ -857,6 +904,108 @@ func (c *Client) IsConnected() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.connected && !c.closed
+}
+
+// startKeepalive starts the keepalive goroutine if configured.
+// startKeepalive starts the keepalive goroutine if configured.
+func (c *Client) startKeepalive() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.startKeepaliveLocked()
+}
+
+// startKeepaliveLocked starts the keepalive goroutine (caller must hold c.mu).
+func (c *Client) startKeepaliveLocked() {
+	interval := c.config.KeepAliveInterval
+	if interval <= 0 {
+		return
+	}
+
+	if c.keepAliveDone != nil {
+		return // Already running
+	}
+
+	c.keepAliveDone = make(chan struct{})
+	c.keepAliveWg.Add(1)
+
+	// Log must use locked version since we hold the lock
+	// But logInfoLocked expects to be called with lock held, which matches.
+	// Wait, logInfoLocked just calls slog which is thread safe?
+	// Let's check logInfoLocked implementation.
+	// It accesses c.slogLogger which is protected by mu?
+	// Yes.
+
+	// However, we want to log OUTSIDE the lock to avoid blocking logging?
+	// No, we are inside the lock. We should use logInfoLocked.
+	// But wait, the original startKeepalive logged "Starting keepalive loop" OUTSIDE the lock.
+	// We can log inside.
+	c.logInfoLocked("Starting keepalive loop logic (interval: %v)", interval)
+
+	go c.keepaliveLoop(interval)
+}
+
+// stopKeepalive stops the keepalive goroutine.
+func (c *Client) stopKeepalive() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.keepAliveDone != nil {
+		close(c.keepAliveDone)
+		c.keepAliveDone = nil
+	}
+}
+
+// stopKeepaliveAndWait stops the keepalive goroutine and waits for it to exit.
+func (c *Client) stopKeepaliveAndWait() {
+	c.stopKeepalive()
+	c.keepAliveWg.Wait()
+}
+
+// keepaliveLoop sends periodic GET_AVAILABLE_RUNSPACES messages.
+func (c *Client) keepaliveLoop(interval time.Duration) {
+	defer c.keepAliveWg.Done()
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		// handle stop signal
+		c.mu.Lock()
+		doneCh := c.keepAliveDone
+		pool := c.psrpPool
+		poolID := c.poolID
+		c.mu.Unlock()
+
+		if doneCh == nil {
+			return
+		}
+
+		select {
+		case <-doneCh:
+			return
+		case <-ticker.C:
+			// Send Keepalive
+			if pool == nil {
+				continue
+			}
+
+			// We need a context for the send
+			// We use a short timeout so we don't block forever
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+
+			// Send GET_AVAILABLE_RUNSPACES
+			// We use a CallID of 1 for keepalives
+			msg := messages.NewGetAvailableRunspaces(poolID, 1)
+
+			// We call pool.SendMessage directly
+			c.logf("Sending Keepalive (GET_AVAILABLE_RUNSPACES)")
+			if err := pool.SendMessage(ctx, msg); err != nil {
+				c.logWarn("Keepalive failed: %v", err)
+				// TODO: consider emitting an event or checking if connection is dead
+			}
+			cancel()
+		}
+	}
 }
 
 // Result represents the result of a PowerShell command execution.

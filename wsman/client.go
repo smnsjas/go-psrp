@@ -63,9 +63,13 @@ func (c *Client) Create(ctx context.Context, options map[string]string, creation
 		WithShellNamespace()
 
 	// Add shell options
+	idleTimeout := "PT30M" // default
 	for name, value := range options {
 		if name == "protocolversion" {
 			env.WithOptionMustComply(name, value)
+		} else if name == "IdleTimeout" {
+			idleTimeout = value
+			// Do not add as a header option, handled in body
 		} else {
 			env.WithOption(name, value)
 		}
@@ -79,7 +83,7 @@ func (c *Client) Create(ctx context.Context, options map[string]string, creation
 		shellBody = `<rsp:Shell ShellId="` + shellID + `" xmlns:rsp="` + NsShell + `">
   <rsp:InputStreams>stdin pr</rsp:InputStreams>
   <rsp:OutputStreams>stdout</rsp:OutputStreams>
-  <rsp:IdleTimeOut>PT30M</rsp:IdleTimeOut>
+  <rsp:IdleTimeOut>` + idleTimeout + `</rsp:IdleTimeOut>
   <creationXml xmlns="http://schemas.microsoft.com/powershell">` + creationXML + `</creationXml>
 </rsp:Shell>`
 	} else {
@@ -87,7 +91,7 @@ func (c *Client) Create(ctx context.Context, options map[string]string, creation
 		shellBody = `<rsp:Shell ShellId="` + shellID + `" xmlns:rsp="` + NsShell + `">
   <rsp:InputStreams>stdin pr</rsp:InputStreams>
   <rsp:OutputStreams>stdout</rsp:OutputStreams>
-  <rsp:IdleTimeOut>PT30M</rsp:IdleTimeOut>
+  <rsp:IdleTimeOut>` + idleTimeout + `</rsp:IdleTimeOut>
 </rsp:Shell>`
 	}
 	env.WithBody([]byte(shellBody))

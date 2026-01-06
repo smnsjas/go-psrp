@@ -14,13 +14,14 @@ type MockBackend struct {
 	mu sync.Mutex
 
 	// Expectations
-	ConnectFunc   func(ctx context.Context) error
-	CloseFunc     func(ctx context.Context) error
-	InitFunc      func(ctx context.Context, pool *runspace.Pool) error
-	PrepareFunc   func(ctx context.Context, p *pipeline.Pipeline, payload string) (io.Reader, func(), error)
-	ShellIDFunc   func() string
-	ReattachFunc  func(ctx context.Context, pool *runspace.Pool, shellID string) error
-	TransportFunc func() io.ReadWriter
+	ConnectFunc               func(ctx context.Context) error
+	CloseFunc                 func(ctx context.Context) error
+	InitFunc                  func(ctx context.Context, pool *runspace.Pool) error
+	PrepareFunc               func(ctx context.Context, p *pipeline.Pipeline, payload string) (io.Reader, func(), error)
+	ShellIDFunc               func() string
+	ReattachFunc              func(ctx context.Context, pool *runspace.Pool, shellID string) error
+	TransportFunc             func() io.ReadWriter
+	SupportsPSRPKeepaliveFunc func() bool
 
 	// State
 	Connected bool
@@ -81,6 +82,13 @@ func (m *MockBackend) Reattach(ctx context.Context, pool *runspace.Pool, shellID
 		return m.ReattachFunc(ctx, pool, shellID)
 	}
 	return nil
+}
+
+func (m *MockBackend) SupportsPSRPKeepalive() bool {
+	if m.SupportsPSRPKeepaliveFunc != nil {
+		return m.SupportsPSRPKeepaliveFunc()
+	}
+	return false
 }
 
 // Mock transport to simulate PSRP fragmentation if needed

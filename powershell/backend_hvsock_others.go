@@ -54,3 +54,8 @@ func (b *HvSocketBackend) ShellID() string {
 func (b *HvSocketBackend) Reattach(_ context.Context, _ *runspace.Pool, _ string) error {
 	return errors.New("hvsock is only supported on windows")
 }
+
+// SupportsPSRPKeepalive returns false on non-Windows platforms (stub).
+func (b *HvSocketBackend) SupportsPSRPKeepalive() bool {
+	return false
+}
