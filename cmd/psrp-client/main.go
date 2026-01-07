@@ -76,6 +76,7 @@ func main() {
 	logLevel := flag.String("loglevel", "", "Log level: debug, info, warn, error (empty = no logging)")
 	keepAlive := flag.Duration("keepalive", 0, "Keepalive interval (e.g. 30s). 0 to disable.")
 	idleTimeout := flag.String("idle-timeout", "", "WSMan shell idle timeout (ISO8601 duration, e.g. PT1H, PT30M)")
+	enableCBT := flag.Bool("cbt", false, "Enable Channel Binding Tokens (CBT) for NTLM (Extended Protection)")
 
 	flag.Parse()
 
@@ -178,6 +179,7 @@ func main() {
 	cfg.Timeout = *timeout
 	cfg.KeepAliveInterval = *keepAlive
 	cfg.IdleTimeout = *idleTimeout
+	cfg.EnableCBT = *enableCBT
 
 	// Kerberos settings apply to both AuthNegotiate (default) and explicit -kerberos
 	cfg.Realm = *realm
