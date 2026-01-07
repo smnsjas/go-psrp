@@ -137,6 +137,12 @@ type Config struct {
 	// RunspaceOpenTimeout specifies the maximum time to wait for a runspace to open.
 	// If 0, defaults to 60 seconds.
 	RunspaceOpenTimeout time.Duration
+
+	// EnableCBT enables Channel Binding Tokens (CBT) for NTLM authentication.
+	// When enabled, the client will include a CBT derived from the TLS server
+	// certificate in NTLM authentication, protecting against NTLM relay attacks.
+	// Requires HTTPS (UseTLS: true). Only applies to NTLM authentication.
+	EnableCBT bool
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -640,12 +646,12 @@ func New(hostname string, cfg Config) (*Client, error) {
 		if err != nil {
 			// Kerberos unavailable, fall back to NTLM via Negotiate header
 			// go-ntlmssp Negotiator handles Negotiate header with NTLM
-			authenticator = auth.NewNTLMAuth(creds)
+			authenticator = auth.NewNTLMAuth(creds, auth.WithCBT(cfg.EnableCBT))
 		} else {
 			authenticator = auth.NewNegotiateAuth(provider)
 		}
 	case AuthNTLM:
-		authenticator = auth.NewNTLMAuth(creds)
+		authenticator = auth.NewNTLMAuth(creds, auth.WithCBT(cfg.EnableCBT))
 	case AuthKerberos:
 		// Kerberos only - no fallback
 		targetSPN := fmt.Sprintf("HTTP/%s", hostname)
@@ -668,7 +674,7 @@ func New(hostname string, cfg Config) (*Client, error) {
 		authenticator = auth.NewBasicAuth(creds)
 	default:
 		// Fallback to Negotiate (shouldn't reach here)
-		authenticator = auth.NewNTLMAuth(creds)
+		authenticator = auth.NewNTLMAuth(creds, auth.WithCBT(cfg.EnableCBT))
 	}
 
 	// Wrap transport with auth
