@@ -180,11 +180,11 @@ func (b *WSManBackend) Disconnect(ctx context.Context) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	if !b.opened {
-		return ErrPoolNotOpened
-	}
 	if b.closed {
 		return ErrPoolClosed
+	}
+	if !b.opened {
+		return ErrPoolNotOpened
 	}
 
 	// Call WSMan Disconnect
