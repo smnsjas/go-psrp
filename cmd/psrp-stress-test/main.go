@@ -23,6 +23,10 @@ func main() {
 	useNTLM := flag.Bool("ntlm", false, "Use NTLM authentication")
 	useKerberos := flag.Bool("kerberos", false, "Use Kerberos authentication")
 
+	// Transport configuration
+	transport := flag.String("transport", "wsman", "Transport type (wsman or hvsocket)")
+	vmid := flag.String("vmid", "", "Hyper-V VM GUID (required for hvsocket)")
+
 	concurrent := flag.Int("concurrent", 5, "Number of concurrent requests to spawn")
 	maxRunspaces := flag.Int("max-runspaces", 2, "Client MaxRunspaces limit (semaphore size)")
 	maxQueue := flag.Int("max-queue", 100, "Client MaxQueueSize limit")
@@ -30,9 +34,21 @@ func main() {
 
 	flag.Parse()
 
-	if *server == "" || *username == "" {
-		fmt.Println("Usage: go run main.go -server <host> -user <user> [options]")
-		flag.PrintDefaults()
+	// Validate required flags based on transport
+	if *transport == "wsman" {
+		if *server == "" || *username == "" {
+			fmt.Println("Usage: go run main.go -transport wsman -server <host> -user <user> [options]")
+			flag.PrintDefaults()
+			os.Exit(1)
+		}
+	} else if *transport == "hvsocket" {
+		if *vmid == "" {
+			fmt.Println("Usage: go run main.go -transport hvsocket -vmid <guid> [options]")
+			flag.PrintDefaults()
+			os.Exit(1)
+		}
+	} else {
+		fmt.Printf("Unknown transport: %s\n", *transport)
 		os.Exit(1)
 	}
 
@@ -55,10 +71,18 @@ func main() {
 	} else if *useNTLM {
 		cfg.AuthType = client.AuthNTLM
 	}
-	// Default is AuthNegotiate
 
-	fmt.Printf("Creating client to %s (Auth: %v, MaxRunspaces=%d)...\n", *server, cfg.AuthType, *maxRunspaces)
-	c, err := client.New(*server, cfg)
+	target := *server
+	if *transport == "hvsocket" {
+		cfg.Transport = client.TransportHvSocket
+		cfg.VMID = *vmid
+		target = *vmid // client.New expects target to be VMID for HvSocket (or hostname for WSMan)
+		fmt.Printf("Creating HvSocket client to VM %s (MaxRunspaces=%d)...\n", *vmid, *maxRunspaces)
+	} else {
+		fmt.Printf("Creating WSMan client to %s (Auth: %v, MaxRunspaces=%d)...\n", *server, cfg.AuthType, *maxRunspaces)
+	}
+
+	c, err := client.New(target, cfg)
 	if err != nil {
 		panic(err)
 	}
