@@ -52,7 +52,8 @@ func (m *MockBackend) Transport() io.ReadWriter {
 	if m.TransportFunc != nil {
 		return m.TransportFunc()
 	}
-	return nil // Should return a mock transport if needed
+	// Return a no-op transport so RunspacePool doesn't panic on nil
+	return &noOpTransport{}
 }
 
 func (m *MockBackend) Init(ctx context.Context, pool *runspace.Pool) error {
@@ -89,6 +90,17 @@ func (m *MockBackend) SupportsPSRPKeepalive() bool {
 		return m.SupportsPSRPKeepaliveFunc()
 	}
 	return false
+}
+
+// noOpTransport implements io.ReadWriter but does nothing
+type noOpTransport struct{}
+
+func (t *noOpTransport) Read(p []byte) (n int, err error) {
+	return 0, io.EOF
+}
+
+func (t *noOpTransport) Write(p []byte) (n int, err error) {
+	return len(p), nil
 }
 
 // Mock transport to simulate PSRP fragmentation if needed

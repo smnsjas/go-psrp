@@ -139,8 +139,8 @@ func TestClient_Close(t *testing.T) {
 // TestDefaultConfig_MaxConcurrent verifies MaxConcurrentCommands default.
 func TestDefaultConfig_MaxConcurrent(t *testing.T) {
 	cfg := DefaultConfig()
-	if cfg.MaxConcurrentCommands != 5 {
-		t.Errorf("MaxConcurrentCommands = %d, want 5", cfg.MaxConcurrentCommands)
+	if cfg.MaxConcurrentCommands != 1 {
+		t.Errorf("MaxConcurrentCommands = %d, want 1", cfg.MaxConcurrentCommands)
 	}
 }
 
@@ -190,7 +190,7 @@ func TestSaveLoadState(t *testing.T) {
 		t.Fatalf("New failed: %v", err)
 	}
 	client.poolID = [16]byte{1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4} // Dummy GUID
-	client.messageID = 123
+	client.callID.Set(123)
 
 	// Manually set properties for serialization test
 	client.config.Transport = TransportHvSocket
