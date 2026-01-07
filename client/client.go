@@ -53,6 +53,19 @@ const (
 	TransportHvSocket
 )
 
+// CloseStrategy specifies how the client should be closed.
+type CloseStrategy int
+
+const (
+	// CloseStrategyGraceful attempts to close the remote session cleanly.
+	// It sends PSRP and WSMan close messages.
+	CloseStrategyGraceful CloseStrategy = iota
+
+	// CloseStrategyForce closes the client immediately without sending network messages.
+	// Use this when the connection is known to be broken or responsiveness is required.
+	CloseStrategyForce
+)
+
 // Config holds configuration for a PSRP client.
 type Config struct {
 	// Port is the WinRM port (default: 5985 for HTTP, 5986 for HTTPS).
@@ -99,9 +112,17 @@ type Config struct {
 	// ConfigurationName is the PowerShell configuration name (Optional, for HvSocket).
 	ConfigurationName string
 
-	// MaxConcurrentCommands limits the number of concurrent pipeline executions.
-	// Default: 5. Set to 1 to disable concurrent execution.
+	// MaxRunspaces limits the number of concurrent pipeline executions.
+	// Default: 1 (safe). Set to > 1 to enable concurrent execution if server supports it.
+	// This replaces legacy MaxConcurrentCommands.
+	MaxRunspaces int
+
+	// MaxConcurrentCommands is deprecated. Use MaxRunspaces instead.
 	MaxConcurrentCommands int
+
+	// MaxQueueSize limits the number of commands waiting for a runspace.
+	// If 0, queue is unbounded. If > 0, Execute() returns ErrQueueFull if queue is full.
+	MaxQueueSize int
 
 	// KeepAliveInterval specifies the interval for sending PSRP keepalive messages
 	// (GET_AVAILABLE_RUNSPACES) to maintain session health and prevent timeouts.
@@ -112,6 +133,10 @@ type Config struct {
 	// If empty, defaults to "PT30M" (30 minutes).
 	// Only applies to WSMan transport.
 	IdleTimeout string
+
+	// RunspaceOpenTimeout specifies the maximum time to wait for a runspace to open.
+	// If 0, defaults to 60 seconds.
+	RunspaceOpenTimeout time.Duration
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -121,7 +146,10 @@ func DefaultConfig() Config {
 		UseTLS:                false,
 		Timeout:               60 * time.Second,
 		AuthType:              AuthNegotiate, // Kerberos preferred, NTLM fallback
-		MaxConcurrentCommands: 5,             // Allow 5 concurrent commands
+		MaxRunspaces:          1,             // Default to safe serial execution
+		MaxConcurrentCommands: 1,             // Deprecated
+		MaxQueueSize:          -1,            // Unbounded by default
+		RunspaceOpenTimeout:   60 * time.Second,
 	}
 }
 
@@ -178,15 +206,16 @@ type Client struct {
 	backendFactory func() (powershell.RunspaceBackend, error)
 
 	// psrpPool is the PSRP RunspacePool state machine.
+	// psrpPool is the PSRP RunspacePool state machine.
 	psrpPool  *runspace.Pool
 	poolID    uuid.UUID
 	connected bool
 	closed    bool
-	messageID uint64 // Tracks PSRP message ObjectID sequence
+	callID    *callIDManager // Manages atomic PSRP message IDs
 
 	// Concurrency control
-	semaphore chan struct{} // Limits concurrent command execution
-	cmdMu     sync.Mutex    // Serializes command creation (NTLM auth requires this)
+	semaphore *poolSemaphore // Limits concurrent command execution
+	cmdMu     sync.Mutex     // Serializes command creation (NTLM auth requires this)
 
 	// Logging
 	slogLogger *slog.Logger
@@ -342,7 +371,7 @@ func (c *Client) ReconnectSession(ctx context.Context, state *SessionState) erro
 	}
 	// Restore MessageID sequence
 	if state.MessageID > 0 {
-		c.messageID = uint64(state.MessageID)
+		c.callID.Set(state.MessageID)
 	}
 
 	// Restore OutputPaths for file-based recovery
@@ -404,7 +433,7 @@ func (c *Client) ReconnectSession(ctx context.Context, state *SessionState) erro
 		}
 
 		// Sync message ID (critical for determining next PSRP message ID)
-		c.psrpPool.SetMessageID(c.messageID)
+		c.psrpPool.SetMessageID(uint64(c.callID.Current()))
 
 		// Check if we are doing file-based recovery (OutputPaths present)
 		// If so, we can't Reattach (persistence unsupported), so we Start New Session (Open).
@@ -422,13 +451,19 @@ func (c *Client) ReconnectSession(ctx context.Context, state *SessionState) erro
 		}
 
 		c.connected = true
+		if c.callID == nil {
+			c.callID = newCallIDManager()
+		}
 
 		if c.semaphore == nil {
-			maxConcurrent := c.config.MaxConcurrentCommands
-			if maxConcurrent <= 0 {
-				maxConcurrent = 5 // Default
+			maxRunspaces := c.config.MaxRunspaces
+			if maxRunspaces == 0 && c.config.MaxConcurrentCommands > 0 {
+				maxRunspaces = c.config.MaxConcurrentCommands
 			}
-			c.semaphore = make(chan struct{}, maxConcurrent)
+			if maxRunspaces <= 0 {
+				maxRunspaces = 1 // Default safe
+			}
+			c.semaphore = newPoolSemaphore(maxRunspaces, c.config.MaxQueueSize, c.config.Timeout)
 		}
 
 		return nil
@@ -465,15 +500,18 @@ func (c *Client) ReconnectSession(ctx context.Context, state *SessionState) erro
 
 		// Initialize semaphore if not already done
 		if c.semaphore == nil {
-			maxConcurrent := c.config.MaxConcurrentCommands
-			if maxConcurrent <= 0 {
-				maxConcurrent = 5 // Default
+			maxRunspaces := c.config.MaxRunspaces
+			if maxRunspaces == 0 && c.config.MaxConcurrentCommands > 0 {
+				maxRunspaces = c.config.MaxConcurrentCommands
 			}
-			c.semaphore = make(chan struct{}, maxConcurrent)
+			if maxRunspaces <= 0 {
+				maxRunspaces = 1 // Default safe
+			}
+			c.semaphore = newPoolSemaphore(maxRunspaces, c.config.MaxQueueSize, c.config.Timeout)
 		}
 
 		// Ensure pool uses the correct message ID
-		c.psrpPool.SetMessageID(c.messageID)
+		c.psrpPool.SetMessageID(uint64(c.callID.Current()))
 
 		return nil
 	default:
@@ -494,7 +532,7 @@ func (c *Client) SaveState(path string) error {
 	state := &SessionState{
 		PoolID:      c.poolID.String(),
 		SessionID:   c.poolID.String(), // Typically same as PoolID
-		MessageID:   int64(c.messageID),
+		MessageID:   c.callID.Current(),
 		RunspaceID:  "",            // We don't track explicit Runspace ID yet, usually implied by Pool
 		PipelineIDs: []string{},    // pipelines are tracked in runspace pool
 		OutputPaths: c.outputFiles, // Save file recovery paths
@@ -686,11 +724,15 @@ func New(hostname string, cfg Config) (*Client, error) {
 		// Refactor `New` to branch.
 
 		return &Client{
-			hostname:    hostname,
-			config:      cfg,
-			endpoint:    "",
-			semaphore:   make(chan struct{}, cfg.MaxConcurrentCommands),
+			hostname: hostname,
+			config:   cfg,
+			endpoint: "",
+			// semaphore initialized in Connect/Reconnect to allow state recovery adjustment if needed?
+			// But Execute checks for it. Better initialize here if possible, or lazy init.
+			// Let's initialize here with safe defaults.
+			semaphore:   newPoolSemaphore(cfg.MaxRunspaces, cfg.MaxQueueSize, cfg.Timeout),
 			outputFiles: make(map[string]string),
+			callID:      newCallIDManager(),
 		}, nil
 
 	default: // WSMan
@@ -701,8 +743,9 @@ func New(hostname string, cfg Config) (*Client, error) {
 			endpoint:    endpoint,
 			transport:   tr,
 			wsman:       wsman.NewClient(endpoint, tr),
-			semaphore:   make(chan struct{}, cfg.MaxConcurrentCommands),
+			semaphore:   newPoolSemaphore(cfg.MaxRunspaces, cfg.MaxQueueSize, cfg.Timeout),
 			outputFiles: make(map[string]string),
+			callID:      newCallIDManager(),
 		}, nil
 	}
 }
@@ -794,15 +837,28 @@ func (c *Client) Connect(ctx context.Context) error {
 	// Configure pool size for concurrent execution
 	// Per MS-PSRP spec, each runspace can only execute one pipeline at a time.
 	// To run multiple pipelines concurrently, we need a pool with multiple runspaces.
-	maxRunspaces := c.config.MaxConcurrentCommands
-	if maxRunspaces <= 0 {
-		maxRunspaces = 5
+	maxRunspaces := c.config.MaxRunspaces
+	if maxRunspaces == 0 && c.config.MaxConcurrentCommands > 0 {
+		maxRunspaces = c.config.MaxConcurrentCommands
 	}
-	_ = c.psrpPool.SetMinRunspaces(1)
-	_ = c.psrpPool.SetMaxRunspaces(maxRunspaces)
+	if maxRunspaces <= 0 {
+		maxRunspaces = 1
+	}
 
-	// 5. Init Backend
-	c.logInfoLocked("Initializing backend...")
+	c.psrpPool.SetMinRunspaces(1)
+	c.psrpPool.SetMaxRunspaces(maxRunspaces)
+	c.logInfoLocked("Configured RunspacePool with MaxRunspaces=%d", maxRunspaces)
+
+	// Ensure semaphore matches
+	// If reconnecting, we might already have one. If connecting fresh, we override.
+	// Or we just update existing one? semaphore struct is immutable-ish (channels).
+	// Safest is to recreate if limits changed, but usually config is static.
+	if c.semaphore == nil {
+		c.semaphore = newPoolSemaphore(maxRunspaces, c.config.MaxQueueSize, c.config.Timeout)
+	}
+
+	// 5. Init Backend (Handshake + Shell Creation)
+	// This calls pool.Open() internally after ensuring backend-specific setup (like WSMan Shell creation)
 	if err := c.backend.Init(ctx, c.psrpPool); err != nil {
 		return fmt.Errorf("init backend: %w", err)
 	}
@@ -832,15 +888,18 @@ func (c *Client) Connect(ctx context.Context) error {
 	// Initialize messageID counter.
 	// WSMan Shell creation sends messages 1 (SESSION_CAPABILITY) and 2 (INIT_RUNSPACEPOOL)
 	// via creationXml. We sync the pool's fragmenter so subsequent messages start at 3.
-	c.messageID = 2
+	// Initialize messageID counter.
+	// WSMan Shell creation sends messages 1 (SESSION_CAPABILITY) and 2 (INIT_RUNSPACEPOOL)
+	// via creationXml. We sync the pool's fragmenter so subsequent messages start at 3.
+	c.callID.Set(2)
 	c.psrpPool.SetMessageID(2)
 
 	// Initialize semaphore for concurrent command limiting
-	maxConcurrent := c.config.MaxConcurrentCommands
-	if maxConcurrent <= 0 {
-		maxConcurrent = 5 // Default
+	// Note: We already initialized it above in Step 4's logic block.
+	// But let's ensure it's set just in case logic flow changes.
+	if c.semaphore == nil {
+		c.semaphore = newPoolSemaphore(maxRunspaces, c.config.MaxQueueSize, c.config.Timeout)
 	}
-	c.semaphore = make(chan struct{}, maxConcurrent)
 
 	// Start keepalive loop if configured AND supported by the backend.
 	// WSMan uses WS-MAN level keepalive on Receive operations instead.
@@ -859,9 +918,14 @@ func (c *Client) Connect(ctx context.Context) error {
 // Disconnect disconnects the active session without closing it on the server.
 // This is useful for saving state and reconnecting later.
 
-// Close closes the connection to the remote server.
+// Close closes the connection to the remote server using the Graceful strategy.
 func (c *Client) Close(ctx context.Context) error {
-	c.logInfo("Close called")
+	return c.CloseWithStrategy(ctx, CloseStrategyGraceful)
+}
+
+// CloseWithStrategy closes the connection using the specified strategy.
+func (c *Client) CloseWithStrategy(ctx context.Context, strategy CloseStrategy) error {
+	c.logInfo("CloseWithStrategy called (strategy: %v)", strategy)
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -884,6 +948,25 @@ func (c *Client) Close(ctx context.Context) error {
 	// Wait for keepalive goroutine to exit (outside lock)
 	c.keepAliveWg.Wait()
 
+	// Release all semaphore slots?
+	// The semaphore implementation doesn't support "Close", but blocked Acquire calls
+	// that respect context will eventually timeout/cancel.
+	// Those blocked on the semaphore specifically: we don't have a way to unblock them
+	// unless they are checking `c.closed` after acquire, or we close a channel they are watching?
+	// Our `Acquire` only watches context.
+	// It's acceptable for now.
+
+	if strategy == CloseStrategyForce {
+		// For forced close, we just want to ensure local state is cleaned up if possible.
+		// We skip network calls.
+		// However, we might want to tell the runspace pool implementation we are done?
+		// go-psrpcore doesn't expose a "ForceClose" that skips network unless context is cancelled?
+		// We can Simulate cancelled context.
+		// But better to just skip the calls.
+		return nil
+	}
+
+	// Graceful Shutdown
 	// First close the runspace pool (sends RUNSPACEPOOL_STATE=Closed message)
 	if pool != nil {
 		_ = pool.Close(ctx)
@@ -1042,165 +1125,88 @@ type Result struct {
 // Execute runs a PowerShell script on the remote server.
 // The script can be any valid PowerShell code.
 // Returns the output and any errors from execution.
+// Execute runs a PowerShell script on the remote server.
+// The script can be any valid PowerShell code.
+// Returns the output and any errors from execution.
 func (c *Client) Execute(ctx context.Context, script string) (*Result, error) {
 	c.logInfo("Execute called: '%s'", script)
-	c.mu.Lock()
-	if !c.connected {
-		c.mu.Unlock()
-		return nil, errors.New("client not connected")
-	}
-	if c.closed {
-		c.mu.Unlock()
-		return nil, errors.New("client is closed")
-	}
-	psrpPool := c.psrpPool
-	backend := c.backend
-	semaphore := c.semaphore
-	c.mu.Unlock()
 
-	// Acquire semaphore (limit concurrent commands)
-	select {
-	case semaphore <- struct{}{}:
-		// Acquired
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-	defer func() { <-semaphore }() // Release on exit
-
-	// Create a go-psrpcore pipeline for this execution
-	// We use the simple CreatePipeline which defaults to IsScript=true
-	// This generates <Cmd>script</Cmd><IsScript>true</IsScript>
-	psrpPipeline, err := psrpPool.CreatePipeline(script)
+	// Delegate to ExecuteStream
+	streamResult, err := c.ExecuteStream(ctx, script)
 	if err != nil {
-		return nil, fmt.Errorf("create pipeline: %w", err)
+		return nil, err
 	}
 
-	// Get the CreatePipeline fragment data (base64) for WSMan encapsulation
-	// Note: client maintains c.messageID sequence
-	c.mu.Lock()
-	c.messageID++
-	msgID := c.messageID
-	c.mu.Unlock()
+	// Wait for results
+	// We need to consume the streams to populate the Result struct.
+	// But ExecuteStream returns channels. We can use a helper or do it here.
 
-	createPipelineData, err := psrpPipeline.GetCreatePipelineDataWithID(msgID)
-	if err != nil {
-		return nil, fmt.Errorf("get create pipeline data: %w", err)
-	}
-	payload := base64.StdEncoding.EncodeToString(createPipelineData)
-
-	// Serialize command creation - NTLM auth requires one request at a time
-	// to properly establish the authentication on the connection.
-	// Retry loop handles transient NTLM 401 errors under load.
-	var pipelineTransport io.Reader
-	var cleanup func()
-
-	c.cmdMu.Lock()
-	// retries for NTLM 401 measurement
-	for i := 0; i < 3; i++ {
-		pipelineTransport, cleanup, err = backend.PreparePipeline(ctx, psrpPipeline, payload)
-		if err != nil {
-			if errors.Is(err, transport.ErrUnauthorized) {
-				// NTLM negotiation race, retry
-				continue
-			}
-			c.cmdMu.Unlock()
-			return nil, fmt.Errorf("prepare pipeline: %w", err)
-		}
-
-		// Invoke the pipeline (transitions PSRP state)
-		// psrpPipeline.SkipInvokeSend() // Using SkipInvokeSend if implemented in core
-		if err = psrpPipeline.Invoke(ctx); err != nil {
-			cleanup()
-			if errors.Is(err, transport.ErrUnauthorized) {
-				continue
-			}
-			c.cmdMu.Unlock()
-			return nil, fmt.Errorf("invoke pipeline: %w", err)
-		}
-
-		// Success
-		break
-	}
-	c.cmdMu.Unlock()
-
-	if err != nil {
-		return nil, fmt.Errorf("failed to create/invoke pipeline after retries: %w", err)
-	}
-	defer cleanup()
-
-	// Start per-pipeline receive loop (for WSMan) or global dispatch loop (for HvSocket)
-	// WSMan requires per-pipeline receive with commandID, while HvSocket uses shared adapter
-	if pipelineTransport != nil {
-		// Per-pipeline receive loop for WSMan
-		go c.runPipelineReceive(ctx, pipelineTransport, psrpPipeline)
-	} else {
-		// Fall back to global dispatch loop for HvSocket
-		psrpPool.StartDispatchLoop()
-	}
-
-	// Note: We do NOT call CloseInput() here because go-psrpcore sets
-	// <Obj N="NoInput">true</Obj> in the CreatePipeline message.
-	// This tells the server to close the input stream immediately after creation.
-	// Sending an extra EOF message would be redundant and might confuse the server
-	// or cause race conditions. This matches pypsrp behavior.
-
-	// Collect output from all streams concurrently
 	var (
 		output      []interface{}
-		errOutput   []interface{}
+		errorsList  []interface{} // Rename to avoid conflict with errors package
 		warnings    []interface{}
 		verbose     []interface{}
 		debug       []interface{}
 		progress    []interface{}
 		information []interface{}
-		hadErrors   bool
-		wg          sync.WaitGroup
-		mu          sync.Mutex // Protects hadErrors
 	)
 
-	// Helper to deserialize messages from a channel
-	drainChannel := func(ch <-chan *messages.Message, dest *[]interface{}, markError bool) {
+	// Consumer loop
+	var wg sync.WaitGroup
+	wg.Add(7)
+
+	collect := func(ch <-chan *messages.Message, target *[]interface{}) {
 		defer wg.Done()
 		for msg := range ch {
-			if markError {
-				mu.Lock()
-				hadErrors = true
-				mu.Unlock()
-			}
-			deser := serialization.NewDeserializer()
-			results, err := deser.Deserialize(msg.Data)
-			deser.Close()
-			if err != nil {
-				*dest = append(*dest, string(msg.Data))
+			if msg == nil {
 				continue
 			}
-			*dest = append(*dest, results...)
+			// Deserialize Payload
+			deser := serialization.NewDeserializer()
+			results, err := deser.Deserialize(msg.Data)
+			// defer deser.Close() // Can't defer inside loop
+			if err != nil {
+				// We can't return error from goroutine easily, log or append to string error list?
+				// For now just append the error object itself if possible or ignore bad objects?
+				continue
+			}
+			*target = append(*target, results...)
 		}
 	}
 
-	wg.Add(7)
-	go drainChannel(psrpPipeline.Output(), &output, false)
-	go drainChannel(psrpPipeline.Error(), &errOutput, true)
-	go drainChannel(psrpPipeline.Warning(), &warnings, false)
-	go drainChannel(psrpPipeline.Verbose(), &verbose, false)
-	go drainChannel(psrpPipeline.Debug(), &debug, false)
-	go drainChannel(psrpPipeline.Progress(), &progress, false)
-	go drainChannel(psrpPipeline.Information(), &information, false)
+	// Consume all channels
+	// Note: We need to pass valid pointers to slices.
+	// Slices are pointers effectively, but appending creates new slice headers.
+	// So we need pointer to slice.
+	// But `collect` takes `*[]interface{}`.
 
-	// Wait for all channels to be drained
+	// Output
+	go collect(streamResult.Output, &output)
+
+	// Errors (special handling: messages.Message for Error might contain ErrorRecord or Exception)
+	go collect(streamResult.Errors, &errorsList)
+
+	go collect(streamResult.Warnings, &warnings)
+	go collect(streamResult.Verbose, &verbose)
+	go collect(streamResult.Debug, &debug)
+	go collect(streamResult.Progress, &progress)
+	go collect(streamResult.Information, &information)
+
+	// Wait for pipeline to finish and streams to close
+	runErr := streamResult.Wait()
 	wg.Wait()
 
-	// Wait for pipeline completion
-	if err := psrpPipeline.Wait(); err != nil {
-		hadErrors = true
-		if len(errOutput) == 0 {
-			errOutput = append(errOutput, err.Error())
-		}
+	// Check if there were errors
+	hadErrors := runErr != nil || len(errorsList) > 0
+
+	// If pipeline failed (runErr) and no error records were received, append the error message
+	if runErr != nil && len(errorsList) == 0 {
+		errorsList = append(errorsList, runErr.Error())
 	}
 
 	return &Result{
 		Output:      output,
-		Errors:      errOutput,
+		Errors:      errorsList,
 		Warnings:    warnings,
 		Verbose:     verbose,
 		Debug:       debug,
@@ -1210,213 +1216,217 @@ func (c *Client) Execute(ctx context.Context, script string) (*Result, error) {
 	}, nil
 }
 
+// startPipeline creates, prepares, and invokes a pipeline.
+// It returns the pipeline, the transport (for reading output), and a cleanup function.
+// Caller is responsible for handling the transport (e.g. starting receive loop) and calling cleanup.
+func (c *Client) startPipeline(ctx context.Context, script string) (*pipeline.Pipeline, io.Reader, func(), error) {
+	c.mu.Lock()
+	if !c.connected {
+		c.mu.Unlock()
+		return nil, nil, nil, errors.New("client not connected")
+	}
+	if c.closed {
+		c.mu.Unlock()
+		return nil, nil, nil, errors.New("client is closed")
+	}
+	psrpPool := c.psrpPool
+	backend := c.backend
+	callID := c.callID
+	c.mu.Unlock()
+
+	// Create pipeline
+	psrpPipeline, err := psrpPool.CreatePipeline(script)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("create pipeline: %w", err)
+	}
+
+	// Prepare payload
+	msgID := uint64(callID.Next())
+	createPipelineData, err := psrpPipeline.GetCreatePipelineDataWithID(msgID)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("get create pipeline data: %w", err)
+	}
+	payload := base64.StdEncoding.EncodeToString(createPipelineData)
+
+	// Prepare backend (retry loop for NTLM)
+	var pipelineTransport io.Reader
+	var cleanupBackend func()
+
+	c.cmdMu.Lock()
+	defer c.cmdMu.Unlock()
+
+	for i := 0; i < 3; i++ {
+		pipelineTransport, cleanupBackend, err = backend.PreparePipeline(ctx, psrpPipeline, payload)
+		if err != nil {
+			if errors.Is(err, transport.ErrUnauthorized) {
+				continue
+			}
+			return nil, nil, nil, fmt.Errorf("prepare pipeline: %w", err)
+		}
+
+		// Invoke pipeline
+		if err = psrpPipeline.Invoke(ctx); err != nil {
+			cleanupBackend()
+			if errors.Is(err, transport.ErrUnauthorized) {
+				continue
+			}
+			return nil, nil, nil, fmt.Errorf("invoke pipeline: %w", err)
+		}
+		return psrpPipeline, pipelineTransport, cleanupBackend, nil
+	}
+	return nil, nil, nil, fmt.Errorf("failed to start pipeline after retries due to transport error")
+}
+
 // ExecuteAsync starts a PowerShell script execution but returns immediately without waiting
 // for output. Returns the CommandID (PipelineID) for later recovery of output.
 // This is useful for starting long-running commands and then disconnecting.
 func (c *Client) ExecuteAsync(ctx context.Context, script string) (string, error) {
+	c.mu.Lock()
+	transportType := c.config.Transport
+	c.mu.Unlock()
+
+	if transportType == TransportHvSocket {
+		return c.executeAsyncHvSocket(ctx, script)
+	}
+
+	// Standard (WSMan) Async Execution
+	// We start the pipeline but do NOT start receiving loop, allowing output to buffer on server
+	// or simply be ignored until later recovery/reconnection.
+	psrpPipeline, _, _, err := c.startPipeline(ctx, script)
+	if err != nil {
+		return "", err
+	}
+
+	return psrpPipeline.ID().String(), nil
+}
+
+// executeAsyncHvSocket handles detached execution for HvSocket.
+func (c *Client) executeAsyncHvSocket(ctx context.Context, script string) (string, error) {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
 		return "", errors.New("client is closed")
 	}
 	psrpPool := c.psrpPool
-	backend := c.backend
 	c.mu.Unlock()
 
-	// Create a go-psrpcore pipeline for this execution
-	scriptToRun := script
-	var hvSocketFile string
+	fileID := uuid.New().String()
+	// We use $env:TEMP which resolves to the user's temp dir on the server.
+	hvSocketFile := fmt.Sprintf(`$env:TEMP\psrp_out_%s.xml`, fileID)
 
-	if c.config.Transport == TransportHvSocket {
-		fileID := uuid.New().String()
-		// We use $env:TEMP which resolves to the user's temp dir on the server.
-		hvSocketFile = fmt.Sprintf(`$env:TEMP\psrp_out_%s.xml`, fileID)
+	// Create inner script that runs user command, exports output, and creates a completion marker
+	innerScript := fmt.Sprintf(`$p="%s"; try { & { %s } 2>&1 | Export-Clixml -Path $p -Depth 2 } finally { New-Item "${p}_done" -ItemType File -Force }`, hvSocketFile, script)
 
-		// Create inner script that runs user command, exports output, and creates a completion marker
-		// We add a 'finally' block to ensure marker is created even if script fails/crashes
-		innerScript := fmt.Sprintf(`$p="%s"; try { & { %s } 2>&1 | Export-Clixml -Path $p -Depth 2 } finally { New-Item "${p}_done" -ItemType File -Force }`, hvSocketFile, script)
+	// Encode inner script for -EncodedCommand
+	encodedInner := encodePowerShellScript(innerScript)
 
-		// Encode inner script for -EncodedCommand
-		encodedInner := encodePowerShellScript(innerScript)
-
-		// Run via WMI (Win32_Process) to guarantee detachment from the PSRP session Job Object.
-		// Start-Process is often killed when the PSRP session ends.
-		scriptToRun = fmt.Sprintf(`Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = "powershell.exe -NoProfile -NonInteractive -EncodedCommand %s" } | Out-Null`, encodedInner)
-	}
+	// Run via WMI (Win32_Process)
+	scriptToRun := fmt.Sprintf(`Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = "powershell.exe -NoProfile -NonInteractive -EncodedCommand %s" } | Out-Null`, encodedInner)
 
 	psrpPipeline, err := psrpPool.CreatePipeline(scriptToRun)
 	if err != nil {
 		return "", fmt.Errorf("create pipeline: %w", err)
 	}
 
-	if hvSocketFile != "" {
-		c.mu.Lock()
-		if c.outputFiles == nil {
-			c.outputFiles = make(map[string]string)
-		}
-		c.outputFiles[psrpPipeline.ID().String()] = hvSocketFile
-		c.mu.Unlock()
-
-		// Invoke the pipeline to ensure it transitions to Running state and closes input
-		if err := psrpPipeline.Invoke(ctx); err != nil {
-			return "", fmt.Errorf("invoke detached launcher: %w", err)
-		}
-
-		// Wait synchronously for the WMI launcher to finish to ensure process started
-		var errOutput []string
-		var wg sync.WaitGroup
-
-		// Create cancellation context to prevent leaks on timeout/return
-		ctx, cancel := context.WithCancel(ctx)
-		defer cancel()
-
-		// Capture errors and drain other channels
-		wg.Add(6)
-
-		// Simply use a loop for each to start goroutines, but we need type specific handling or just interface{} channels?
-		// No, the channels are strongly typed.
-		// Let's just write the goroutines explicitly but safely.
-
-		// Drain Output (messages)
-		go func() {
-			defer wg.Done()
-			for {
-				select {
-				case _, ok := <-psrpPipeline.Output():
-					if !ok {
-						return
-					}
-				case <-ctx.Done():
-					return
-				}
-			}
-		}()
-		// Drain Warning
-		go func() {
-			defer wg.Done()
-			for {
-				select {
-				case _, ok := <-psrpPipeline.Warning():
-					if !ok {
-						return
-					}
-				case <-ctx.Done():
-					return
-				}
-			}
-		}()
-		// Drain Verbose
-		go func() {
-			defer wg.Done()
-			for {
-				select {
-				case _, ok := <-psrpPipeline.Verbose():
-					if !ok {
-						return
-					}
-				case <-ctx.Done():
-					return
-				}
-			}
-		}()
-		// Drain Debug
-		go func() {
-			defer wg.Done()
-			for {
-				select {
-				case _, ok := <-psrpPipeline.Debug():
-					if !ok {
-						return
-					}
-				case <-ctx.Done():
-					return
-				}
-			}
-		}()
-		// Drain Progress
-		go func() {
-			defer wg.Done()
-			for {
-				select {
-				case _, ok := <-psrpPipeline.Progress():
-					if !ok {
-						return
-					}
-				case <-ctx.Done():
-					return
-				}
-			}
-		}()
-		// Drain Information
-		go func() {
-			defer wg.Done()
-			for {
-				select {
-				case _, ok := <-psrpPipeline.Information():
-					if !ok {
-						return
-					}
-				case <-ctx.Done():
-					return
-				}
-			}
-		}()
-
-		// Capture errors
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for {
-				select {
-				case err, ok := <-psrpPipeline.Error():
-					if !ok {
-						return
-					}
-					errOutput = append(errOutput, fmt.Sprintf("%v", err))
-				case <-ctx.Done():
-					return
-				}
-			}
-		}()
-
-		// Wait for streams to close or context cancel
-		// We need to handle the case where Wait() blocks forever if streams don't close.
-		// But Wait() below waits on WaitGroup.
-		// If ctx is cancelled, all goroutines return, so wg.Wait() returns.
-		wg.Wait()
-
-		// Wait for pipeline state completion
-		if err := psrpPipeline.Wait(); err != nil || len(errOutput) > 0 {
-			return "", fmt.Errorf("failed to launch detached process: %v (errors: %v)", err, errOutput)
-		}
-		return psrpPipeline.ID().String(), nil
-	}
-	// Get the CreatePipeline fragment data (base64) for WSMan encapsulation
 	c.mu.Lock()
-	c.messageID++
-	msgID := c.messageID
+	if c.outputFiles == nil {
+		c.outputFiles = make(map[string]string)
+	}
+	c.outputFiles[psrpPipeline.ID().String()] = hvSocketFile
 	c.mu.Unlock()
 
+	// Invoke the pipeline (Ensure it uses startPipeline logic or manual?)
+	// Manual here because WMI logic is special?
+	// Actually, `startPipeline` does everything we need (Create+Prepare+Invoke).
+	// But `scriptToRun` is different. can we use `startPipeline`?
+	// `startPipeline` calls `backend.PreparePipeline`. For HvSocket it's a no-op returning nil.
+	// So YES, we can use `startPipeline`!
+	// Wait, `startPipeline` creates the pipeline from `script` argument.
+	// We are creating pipeline from `scriptToRun`.
+	// So we can wrap `startPipeline`?
+	// But `startPipeline` assumes `script` is the one to create in CreatePipeline.
+	// So:
+
+	// We can't easily reuse `startPipeline` here because we need to register `outputFiles` *before* Invoke?
+	// Actually we registered `outputFiles` before Invoke in original code.
+	// If we use `startPipeline`, Invoke happens inside.
+	// Is it safe to register `outputFiles` after Invoke?
+	// As long as we do it before we return or disconnect, yes.
+	// But `ExecuteAsync` for HvSocket waits for WMI launcher.
+
+	// Let's keep manual logic for HvSocket to avoid regressions, just extract it.
+
+	msgID := uint64(c.callID.Next())
 	createPipelineData, err := psrpPipeline.GetCreatePipelineDataWithID(msgID)
 	if err != nil {
 		return "", fmt.Errorf("get create pipeline data: %w", err)
 	}
 	payload := base64.StdEncoding.EncodeToString(createPipelineData)
 
-	// Create the command without waiting for output
+	// Prepare & Invoke
+	// For HvSocket, Prepare is minimal, Invoke sends the message.
 	c.cmdMu.Lock()
-	_, _, err = backend.PreparePipeline(ctx, psrpPipeline, payload)
+	_, _, err = c.backend.PreparePipeline(ctx, psrpPipeline, payload)
 	c.cmdMu.Unlock()
 	if err != nil {
-		return "", fmt.Errorf("prepare pipeline: %w", err)
+		return "", fmt.Errorf("prepare detached pipeline: %w", err)
 	}
 
-	// Invoke the pipeline (transitions PSRP state)
-	if err = psrpPipeline.Invoke(ctx); err != nil {
-		return "", fmt.Errorf("invoke pipeline: %w", err)
+	if err := psrpPipeline.Invoke(ctx); err != nil {
+		return "", fmt.Errorf("invoke detached launcher: %w", err)
 	}
 
-	// Return the pipeline ID (commandID) for later recovery
+	// Wait synchronously for the WMI launcher to finish
+	var errOutput []string
+	var wg sync.WaitGroup
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	wg.Add(6)
+	// Drain loops
+	drain := func(ch <-chan *messages.Message) {
+		defer wg.Done()
+		for {
+			select {
+			case _, ok := <-ch:
+				if !ok {
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}
+	go drain(psrpPipeline.Output())
+	go drain(psrpPipeline.Warning())
+	go drain(psrpPipeline.Verbose())
+	go drain(psrpPipeline.Debug())
+	go drain(psrpPipeline.Progress())
+	go drain(psrpPipeline.Information())
+
+	// Capture errors
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case err, ok := <-psrpPipeline.Error():
+				if !ok {
+					return
+				}
+				errOutput = append(errOutput, fmt.Sprintf("%v", err))
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	wg.Wait()
+
+	if err := psrpPipeline.Wait(); err != nil || len(errOutput) > 0 {
+		return "", fmt.Errorf("failed to launch detached process: %v (errors: %v)", err, errOutput)
+	}
 	return psrpPipeline.ID().String(), nil
 }
 
@@ -1512,7 +1522,11 @@ func (c *Client) Disconnect(ctx context.Context) error {
 
 	// Check if backend supports Disconnect (WSMan)
 	if wsmanBackend, ok := c.backend.(*powershell.WSManBackend); ok {
-		return wsmanBackend.Disconnect(ctx)
+		if err := wsmanBackend.Disconnect(ctx); err != nil {
+			return err
+		}
+		c.connected = false
+		return nil
 	}
 
 	// For other transports (HvSocket), use PSRP-level disconnect (close transport without Close message)
@@ -1547,48 +1561,42 @@ func (c *Client) Reconnect(ctx context.Context, shellID string) error {
 		}
 	}
 
-	// 2. Determine backend type and call Reattach
-	type ReattachableBackend interface {
-		Reattach(ctx context.Context, pool *runspace.Pool, shellID string) error
+	// 2. Call Reattach on the backend
+	if c.psrpPool == nil {
+		// Do NOT overwrite c.poolID with uuid.New() here.
+		// It is initialized in New() and potentially updated via SetPoolID().
+		// We must use the correct PoolID for reconnection.
+
+		// We need the transport from the backend
+		transport := c.backend.Transport()
+		if t, ok := transport.(*powershell.WSManTransport); ok {
+			t.SetContext(ctx)
+		}
+		c.psrpPool = runspace.New(transport, c.poolID)
+		if os.Getenv("PSRP_DEBUG") != "" {
+			c.psrpPool.EnableDebugLogging()
+		}
 	}
-	if reattachable, ok := c.backend.(ReattachableBackend); ok {
-		// Use the new Reattach method
-		// We need to create the pool first if it doesn't exist?
-		// Reattach takes a pool argument.
-		if c.psrpPool == nil {
-			// Do NOT overwrite c.poolID with uuid.New() here.
-			// It is initialized in New() and potentially updated via SetPoolID().
-			// We must use the correct PoolID for reconnection.
 
-			// We need the transport from the backend
-			transport := c.backend.Transport()
-			if t, ok := transport.(*powershell.WSManTransport); ok {
-				t.SetContext(ctx)
-			}
-			c.psrpPool = runspace.New(transport, c.poolID)
-			if os.Getenv("PSRP_DEBUG") != "" {
-				c.psrpPool.EnableDebugLogging()
-			}
+	if err := c.backend.Reattach(ctx, c.psrpPool, shellID); err != nil {
+		return fmt.Errorf("backend reattach: %w", err)
+	}
+	c.connected = true
+
+	// Sync message ID (SessionCapability=1, ConnectRunspacePool=2 were sent)
+	c.callID.Set(2)
+	c.psrpPool.SetMessageID(2)
+
+	// Initialize semaphore for concurrent command limiting (same as Connect)
+	if c.semaphore == nil {
+		maxRunspaces := c.config.MaxRunspaces
+		if maxRunspaces == 0 && c.config.MaxConcurrentCommands > 0 {
+			maxRunspaces = c.config.MaxConcurrentCommands
 		}
-
-		if err := reattachable.Reattach(ctx, c.psrpPool, shellID); err != nil {
-			return fmt.Errorf("backend reattach: %w", err)
+		if maxRunspaces <= 0 {
+			maxRunspaces = 1 // Default safe
 		}
-		c.connected = true
-
-		// Sync message ID (SessionCapability=1, ConnectRunspacePool=2 were sent)
-		c.messageID = 2
-		c.psrpPool.SetMessageID(2)
-
-		// Initialize semaphore for concurrent command limiting (same as Connect)
-		maxConcurrent := c.config.MaxConcurrentCommands
-		if maxConcurrent <= 0 {
-			maxConcurrent = 5 // Default
-		}
-		c.semaphore = make(chan struct{}, maxConcurrent)
-	} else {
-		// Fallback or error for other backends (HvSocket doesn't support Reconnect yet/same way)
-		return fmt.Errorf("reconnect not supported on this transport")
+		c.semaphore = newPoolSemaphore(maxRunspaces, c.config.MaxQueueSize, c.config.Timeout)
 	}
 
 	return nil

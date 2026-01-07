@@ -7,7 +7,7 @@
 //
 // # Quick Start
 //
-//	c, err := client.NewClient(ctx, client.Config{
+//	c, err := client.New(ctx, client.Config{
 //	    Endpoint: "https://server:5986/wsman",
 //	    Username: "administrator",
 //	    Password: "password",

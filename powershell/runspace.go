@@ -194,6 +194,7 @@ func (b *WSManBackend) Disconnect(ctx context.Context) error {
 
 	// Mark as closed/disconnected locally (we can't use it anymore until reconnect)
 	b.closed = true
+	b.opened = false
 	return nil
 }
 
@@ -239,6 +240,7 @@ func (b *WSManBackend) Reattach(ctx context.Context, pool *runspace.Pool, shellI
 
 	b.shellID = shellID
 	b.opened = true
+	b.closed = false
 
 	// 4. Process the PSRP response data (contains CONNECT_RUNSPACEPOOL response + state)
 	if len(respData) > 0 {

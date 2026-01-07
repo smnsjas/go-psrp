@@ -2,12 +2,9 @@ package client
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
-	"io"
 
-	"github.com/smnsjas/go-psrp/wsman/transport"
 	"github.com/smnsjas/go-psrpcore/messages"
 	"github.com/smnsjas/go-psrpcore/pipeline"
 )
@@ -46,89 +43,36 @@ func (sr *StreamResult) Cancel() {
 // that provides access to output as it is produced.
 // The caller is responsible for consuming the output channels and calling Wait().
 func (c *Client) ExecuteStream(ctx context.Context, script string) (*StreamResult, error) {
+	// Acquire semaphore first
 	c.mu.Lock()
-	if !c.connected {
+	if c.semaphore == nil {
 		c.mu.Unlock()
-		return nil, errors.New("client not connected")
+		return nil, errors.New("semaphore not initialized")
 	}
-	if c.closed {
-		c.mu.Unlock()
-		return nil, errors.New("client is closed")
-	}
-	psrpPool := c.psrpPool
-	backend := c.backend
-	semaphore := c.semaphore
-	c.mu.Unlock()
+	sem := c.semaphore
+	c.mu.Unlock() // Unlock before acquire to avoid holding lock while waiting
 
-	// Acquire semaphore
-	select {
-	case semaphore <- struct{}{}:
-		// Acquired
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	if err := sem.Acquire(ctx); err != nil {
+		return nil, fmt.Errorf("pool busy: %w", err)
 	}
 
-	// Create pipeline
-	psrpPipeline, err := psrpPool.CreatePipeline(script)
+	psrpPipeline, pipelineTransport, cleanupBackend, err := c.startPipeline(ctx, script)
 	if err != nil {
-		<-semaphore // Release on error
-		return nil, fmt.Errorf("create pipeline: %w", err)
-	}
-
-	// Prepare payload (same as Execute)
-	c.mu.Lock()
-	c.messageID++
-	msgID := c.messageID
-	c.mu.Unlock()
-
-	createPipelineData, err := psrpPipeline.GetCreatePipelineDataWithID(msgID)
-	if err != nil {
-		<-semaphore
-		return nil, fmt.Errorf("get create pipeline data: %w", err)
-	}
-	payload := base64.StdEncoding.EncodeToString(createPipelineData)
-
-	// Serialize command creation for NTLM compatibility
-	// Retry loop handles transient NTLM 401 errors under load.
-	var pipelineTransport io.Reader
-	var cleanupBackend func()
-
-	c.cmdMu.Lock()
-	for i := 0; i < 3; i++ {
-		pipelineTransport, cleanupBackend, err = backend.PreparePipeline(ctx, psrpPipeline, payload)
-		if err != nil {
-			if errors.Is(err, transport.ErrUnauthorized) {
-				continue
-			}
-			c.cmdMu.Unlock()
-			<-semaphore
-			return nil, fmt.Errorf("prepare pipeline: %w", err)
-		}
-
-		// Invoke pipeline
-		if err = psrpPipeline.Invoke(ctx); err != nil {
-			c.cmdMu.Unlock()
-			cleanupBackend()
-			if errors.Is(err, transport.ErrUnauthorized) {
-				continue
-			}
-			<-semaphore
-			return nil, fmt.Errorf("invoke pipeline: %w", err)
-		}
-		break
-	}
-	c.cmdMu.Unlock()
-
-	if err != nil {
-		<-semaphore
-		return nil, fmt.Errorf("failed to create/invoke pipeline after retries: %w", err)
+		sem.Release()
+		return nil, err
 	}
 
 	// Start per-pipeline receive loop (for WSMan) or global dispatch loop (for HvSocket)
 	if pipelineTransport != nil {
 		go c.runPipelineReceive(ctx, pipelineTransport, psrpPipeline)
 	} else {
-		psrpPool.StartDispatchLoop()
+		// Ensure dispatch loop is running (idempotent)
+		c.mu.Lock()
+		pool := c.psrpPool
+		c.mu.Unlock()
+		if pool != nil {
+			pool.StartDispatchLoop()
+		}
 	}
 
 	// Close input for script execution
@@ -145,8 +89,10 @@ func (c *Client) ExecuteStream(ctx context.Context, script string) (*StreamResul
 		Progress:    psrpPipeline.Progress(),
 		Information: psrpPipeline.Information(),
 		cleanup: func() {
-			cleanupBackend()
-			<-semaphore // Release semaphore
+			if cleanupBackend != nil {
+				cleanupBackend()
+			}
+			sem.Release() // Release semaphore
 		},
 	}
 

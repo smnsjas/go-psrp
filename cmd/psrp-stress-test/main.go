@@ -1,0 +1,149 @@
+package main
+
+import (
+	"bufio"
+	"context"
+	"flag"
+	"fmt"
+	"os"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/smnsjas/go-psrp/client"
+	"golang.org/x/term"
+)
+
+func main() {
+	server := flag.String("server", "", "WinRM server hostname")
+	username := flag.String("user", "", "Username")
+	password := flag.String("pass", "", "Password")
+	useTLS := flag.Bool("tls", false, "Use HTTPS")
+	insecure := flag.Bool("insecure", false, "Skip TLS verify")
+	useNTLM := flag.Bool("ntlm", false, "Use NTLM authentication")
+	useKerberos := flag.Bool("kerberos", false, "Use Kerberos authentication")
+
+	concurrent := flag.Int("concurrent", 5, "Number of concurrent requests to spawn")
+	maxRunspaces := flag.Int("max-runspaces", 2, "Client MaxRunspaces limit (semaphore size)")
+	maxQueue := flag.Int("max-queue", 100, "Client MaxQueueSize limit")
+	sleepSec := flag.Int("sleep", 2, "Seconds to sleep in each request")
+
+	flag.Parse()
+
+	if *server == "" || *username == "" {
+		fmt.Println("Usage: go run main.go -server <host> -user <user> [options]")
+		flag.PrintDefaults()
+		os.Exit(1)
+	}
+
+	pass := getPassword(*password)
+
+	cfg := client.DefaultConfig()
+	cfg.Username = *username
+	cfg.Password = pass
+	cfg.UseTLS = *useTLS
+	cfg.InsecureSkipVerify = *insecure
+	cfg.MaxRunspaces = *maxRunspaces
+	cfg.MaxQueueSize = *maxQueue
+
+	if *useTLS {
+		cfg.Port = 5986
+	}
+
+	if *useKerberos {
+		cfg.AuthType = client.AuthKerberos
+	} else if *useNTLM {
+		cfg.AuthType = client.AuthNTLM
+	}
+	// Default is AuthNegotiate
+
+	fmt.Printf("Creating client to %s (Auth: %v, MaxRunspaces=%d)...\n", *server, cfg.AuthType, *maxRunspaces)
+	c, err := client.New(*server, cfg)
+	if err != nil {
+		panic(err)
+	}
+	defer c.Close(context.Background())
+
+	fmt.Println("Connecting...")
+	if err := c.Connect(context.Background()); err != nil {
+		panic(err)
+	}
+
+	fmt.Printf("Spawning %d concurrent requests (each sleeps %ds)...\n", *concurrent, *sleepSec)
+	fmt.Println("Observe: Only", *maxRunspaces, "should run at once.")
+	fmt.Println("---------------------------------------------------")
+
+	var wg sync.WaitGroup
+	start := time.Now()
+
+	for i := 0; i < *concurrent; i++ {
+		wg.Add(1)
+		id := i + 1
+		go func(id int) {
+			defer wg.Done()
+
+			// Script calls Start-Sleep
+			script := fmt.Sprintf("Write-Output 'Start %d'; Start-Sleep -Seconds %d; Write-Output 'End %d'", id, *sleepSec, id)
+
+			reqStart := time.Now()
+			// fmt.Printf("[%s] Req %d: Queued\n", time.Since(start).Round(time.Millisecond), id)
+
+			res, err := c.Execute(context.Background(), script)
+
+			duration := time.Since(reqStart)
+			if err != nil {
+				fmt.Printf("[%s] Req %d: ERROR: %v\n", time.Since(start).Round(time.Millisecond), id, err)
+				return
+			}
+
+			// Show output to confirm it ran
+			output := ""
+			if len(res.Output) > 0 {
+				output = fmt.Sprintf("%v", res.Output)
+			}
+
+			fmt.Printf("[%s] Req %d: Finished in %s. Output: %s\n",
+				time.Since(start).Round(time.Millisecond), id, duration.Round(time.Millisecond), output)
+		}(id)
+	}
+
+	wg.Wait()
+	fmt.Println("---------------------------------------------------")
+	fmt.Println("All done.")
+}
+
+// getPassword returns password from flag, env var, or prompts for it.
+func getPassword(flagValue string) string {
+	// 1. Check flag
+	if flagValue != "" {
+		return flagValue
+	}
+
+	// 2. Check environment variable
+	if envPass := os.Getenv("PSRP_PASSWORD"); envPass != "" {
+		return envPass
+	}
+
+	// 3. Prompt for password (hide input if terminal)
+	fmt.Fprint(os.Stderr, "Password: ")
+
+	// Use os.Stdin.Fd() cast to int for cross-platform compatibility
+	fd := int(os.Stdin.Fd())
+	if term.IsTerminal(fd) {
+		// Terminal: read password without echo
+		passBytes, err := term.ReadPassword(fd)
+		fmt.Fprintln(os.Stderr) // newline after password
+		if err != nil {
+			return ""
+		}
+		return string(passBytes)
+	}
+
+	// Not a terminal (piped input): read line
+	reader := bufio.NewReader(os.Stdin)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(line)
+}
