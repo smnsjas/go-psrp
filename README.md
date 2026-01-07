@@ -107,6 +107,65 @@ func main() {
         fmt.Printf("%+v\n", obj)
     }
 }
+```go
+    // Execute a PowerShell command
+    result, err := c.Execute(ctx, "Get-Process | Select-Object -First 5 Name, Id")
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    for _, obj := range result.Output {
+        fmt.Printf("%+v\n", obj)
+    }
+}
+```
+
+### Concurrent Execution
+
+To execute commands in parallel, configure `MaxRunspaces` > 1:
+
+```go
+cfg := client.DefaultConfig()
+cfg.MaxRunspaces = 5 // Allow 5 concurrent pipelines
+
+c, _ := client.New(target, cfg)
+// ... connect ...
+
+// These will run in parallel (up to 5):
+go c.Execute(ctx, "Start-Sleep 5; 'Job 1'")
+go c.Execute(ctx, "Start-Sleep 5; 'Job 2'")
+```
+
+### Streaming Output
+
+For long-running commands, process output in real-time:
+
+```go
+// Returns channels immediately
+stream, err := c.ExecuteStream(ctx, "1..10 | ForEach-Object { $_; Start-Sleep 1 }")
+if err != nil {
+    log.Fatal(err)
+}
+
+// Consuming channels (Output, Error, Warning, etc.)
+for output := range stream.Output {
+    fmt.Println("Received:", output)
+}
+// Note: ExecuteStream handles cleanup automatically when streams are consumed
+```
+
+### Resilience & Reconnection
+
+Disconnect from a session and reconnect later (WSMan only):
+
+```go
+// 1. Disconnect (session keeps running on server)
+shellID := c.ShellID()
+err := c.Disconnect(ctx)
+
+// 2. Reconnect later
+c2, _ := client.New(target, cfg)
+err := c2.Reconnect(ctx, shellID)
 ```
 
 ### PowerShell Direct (HVSocket) - Windows Only
