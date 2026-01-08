@@ -368,17 +368,17 @@ func (c *Client) logError(format string, v ...interface{}) {
 // and removing potentially sensitive content.
 func sanitizeScriptForLogging(script string) string {
 	const maxLen = 100
-	
+
 	// Check for sensitive patterns first (applies to all scripts)
 	if containsSensitivePattern(script) {
 		return "[script contains sensitive data - not logged]"
 	}
-	
+
 	// If script is short enough, return as-is (already checked for sensitive patterns)
 	if len(script) <= maxLen {
 		return script
 	}
-	
+
 	// Long scripts are truncated
 	return script[:maxLen] + "... [truncated]"
 }
@@ -917,6 +917,13 @@ func (c *Client) Connect(ctx context.Context) error {
 	// This calls pool.Open() internally after ensuring backend-specific setup (like WSMan Shell creation)
 	if err := c.backend.Init(ctx, c.psrpPool); err != nil {
 		return fmt.Errorf("init backend: %w", err)
+	}
+
+	// 6. Start dispatch loop for shared transports (HvSocket)
+	// For WSMan, per-pipeline transports are used instead.
+	// SupportsPSRPKeepalive() returns true for HvSocket (shared transport).
+	if c.backend.SupportsPSRPKeepalive() {
+		c.psrpPool.StartDispatchLoop()
 	}
 
 	// 4. Drain Shell Output (RunspacePoolState) to ensure pool is ready
