@@ -363,6 +363,53 @@ func (c *Client) logError(format string, v ...interface{}) {
 	}
 }
 
+// sanitizeScriptForLogging truncates and sanitizes scripts for safe logging.
+// It prevents accidental credential exposure in logs by truncating long scripts
+// and removing potentially sensitive content.
+func sanitizeScriptForLogging(script string) string {
+	const maxLen = 100
+	if len(script) <= maxLen {
+		// Short scripts are logged directly, but we still need to be careful
+		// Check for common patterns that might contain credentials
+		if containsSensitivePattern(script) {
+			return "[script contains sensitive data - not logged]"
+		}
+		return script
+	}
+	// Long scripts are truncated and marked as such
+	return script[:maxLen] + "... [truncated]"
+}
+
+// containsSensitivePattern checks if a string contains common patterns
+// that might indicate sensitive data like passwords or credentials.
+func containsSensitivePattern(s string) bool {
+	// Convert to lowercase for case-insensitive matching
+	lower := strings.ToLower(s)
+
+	// Common patterns that might indicate credentials
+	sensitivePatterns := []string{
+		"password",
+		"credential",
+		"secret",
+		"apikey",
+		"api_key",
+		"access_token",
+		"accesstoken",
+		"-password",
+		"-credential",
+		"convertto-securestring",
+		"pscredential",
+		"get-credential",
+	}
+
+	for _, pattern := range sensitivePatterns {
+		if strings.Contains(lower, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
 // ReconnectSession connects to an existing disconnected session using the provided state.
 // This is the transport-agnostic version of Reconnect.
 func (c *Client) ReconnectSession(ctx context.Context, state *SessionState) error {
@@ -1135,7 +1182,7 @@ type Result struct {
 // The script can be any valid PowerShell code.
 // Returns the output and any errors from execution.
 func (c *Client) Execute(ctx context.Context, script string) (*Result, error) {
-	c.logInfo("Execute called: '%s'", script)
+	c.logInfo("Execute called: '%s'", sanitizeScriptForLogging(script))
 
 	// Delegate to ExecuteStream
 	streamResult, err := c.ExecuteStream(ctx, script)
@@ -1320,8 +1367,13 @@ func (c *Client) executeAsyncHvSocket(ctx context.Context, script string) (strin
 	// We use $env:TEMP which resolves to the user's temp dir on the server.
 	hvSocketFile := fmt.Sprintf(`$env:TEMP\psrp_out_%s.xml`, fileID)
 
-	// Create inner script that runs user command, exports output, and creates a completion marker
-	innerScript := fmt.Sprintf(`$p="%s"; try { & { %s } 2>&1 | Export-Clixml -Path $p -Depth 2 } finally { New-Item "${p}_done" -ItemType File -Force }`, hvSocketFile, script)
+	// Security: Encode the user script separately to prevent injection
+	// The user script is executed via -EncodedCommand to avoid quote escaping issues
+	encodedUserScript := encodePowerShellScript(script)
+
+	// Create inner script that runs user command via encoded command, exports output, and creates a completion marker
+	// This prevents script injection by not directly embedding user input in string literals
+	innerScript := fmt.Sprintf(`$p="%s"; try { & powershell.exe -NoProfile -NonInteractive -EncodedCommand %s 2>&1 | Export-Clixml -Path $p -Depth 2 } finally { New-Item "${p}_done" -ItemType File -Force }`, hvSocketFile, encodedUserScript)
 
 	// Encode inner script for -EncodedCommand
 	encodedInner := encodePowerShellScript(innerScript)
