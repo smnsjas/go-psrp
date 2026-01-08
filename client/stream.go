@@ -62,18 +62,11 @@ func (c *Client) ExecuteStream(ctx context.Context, script string) (*StreamResul
 		return nil, err
 	}
 
-	// Start per-pipeline receive loop (for WSMan) or global dispatch loop (for HvSocket)
+	// Start per-pipeline receive loop (for WSMan) or use dispatch loop (for HvSocket)
 	if pipelineTransport != nil {
 		go c.runPipelineReceive(ctx, pipelineTransport, psrpPipeline)
-	} else {
-		// Ensure dispatch loop is running (idempotent)
-		c.mu.Lock()
-		pool := c.psrpPool
-		c.mu.Unlock()
-		if pool != nil {
-			pool.StartDispatchLoop()
-		}
 	}
+	// For HvSocket: dispatch loop was started in Connect()
 
 	// Close input for script execution
 	_ = psrpPipeline.CloseInput(ctx)
