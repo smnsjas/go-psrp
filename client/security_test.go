@@ -67,6 +67,16 @@ func TestSanitizeScriptForLogging(t *testing.T) {
 			script:   "Connect-API -access_token 'abc'",
 			expected: "[script contains sensitive data - not logged]",
 		},
+		{
+			name:     "long script with password in first 100 chars",
+			script:   "New-User -Name test -Password 'secret' " + strings.Repeat("x", 100),
+			expected: "[script contains sensitive data - not logged]",
+		},
+		{
+			name:     "long script with password after 100 chars",
+			script:   strings.Repeat("a", 150) + " -Password 'secret'",
+			expected: "[script contains sensitive data - not logged]",
+		},
 	}
 
 	for _, tt := range tests {
