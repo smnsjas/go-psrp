@@ -46,6 +46,7 @@ This library builds on [go-psrpcore](https://github.com/smnsjas/go-psrpcore) by 
   - **HVSocket** - PowerShell Direct to Hyper-V VMs (Windows only)
 - **Authentication**
   - Basic, NTLM (explicit credentials)
+    - Supports **Extended Protection (Channel Binding Tokens)** for NTLM
   - Kerberos (pure Go via gokrb5, cross-platform)
   - Windows SSPI (native Negotiate/Kerberos on Windows)
 - **Full PSRP Support** - RunspacePools, Pipelines, Output streams
@@ -192,6 +193,7 @@ cfg.Password = "password"
 cfg.AuthType = client.AuthNTLM
 cfg.UseTLS = true
 cfg.Port = 5986
+cfg.EnableCBT = true // Enable Extended Protection (requires HTTPS)
 ```
 
 ### Using Kerberos Authentication (Cross-Platform)
@@ -326,6 +328,7 @@ go build ./cmd/psrp-client
 | `-async` | Start command and disconnect immediately | `false` |
 | `-save-session` | Save session state to file on disconnect | - |
 | `-restore-session` | Restore session state from file | - |
+| `-cbt` | Enable NTLM Channel Binding Tokens (Extended Protection) | `false` |
 
 ## Package Structure
 
