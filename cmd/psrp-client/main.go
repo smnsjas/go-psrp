@@ -45,7 +45,7 @@ func main() {
 	server := flag.String("server", "", "WinRM server hostname")
 	username := flag.String("user", "", "Username for authentication")
 	password := flag.String("pass", "", "Password (use PSRP_PASSWORD env var instead)")
-	script := flag.String("script", "Get-Process | Select-Object -First 5", "PowerShell script to execute")
+	script := flag.String("script", "", "PowerShell script to execute")
 	useTLS := flag.Bool("tls", false, "Use HTTPS (port 5986)")
 	port := flag.Int("port", 0, "WinRM port (default: 5985 for HTTP, 5986 for HTTPS)")
 	insecure := flag.Bool("insecure", false, "Skip TLS certificate verification")
