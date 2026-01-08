@@ -206,19 +206,22 @@ func TestExecuteLoggingSanitization(t *testing.T) {
 // TestScriptInjectionPrevention tests that executeAsyncHvSocket prevents injection.
 func TestScriptInjectionPrevention(t *testing.T) {
 	// Test various injection attempts to ensure they're properly encoded
-	injectionAttempts := []string{
-		`"; Remove-Item C:\*; "`,
-		`' | Stop-Process -Force; '`,
-		"$(Invoke-Expression 'evil code')",
-		"`$(danger)",
-		"test'; evil-command; 'test",
+	injectionAttempts := []struct {
+		name   string
+		script string
+	}{
+		{"quote_semicolon", `"; Remove-Item C:\*; "`},
+		{"pipe", `' | Stop-Process -Force; '`},
+		{"dollar_invoke", "$(Invoke-Expression 'evil code')"},
+		{"backtick_dollar", "`$(danger)"},
+		{"quote_semicolon_quote", "test'; evil-command; 'test"},
 	}
 
-	for _, attempt := range injectionAttempts {
-		t.Run("injection_"+attempt[:10], func(t *testing.T) {
+	for _, tt := range injectionAttempts {
+		t.Run(tt.name, func(t *testing.T) {
 			// The encodePowerShellScript function should base64-encode the entire script,
 			// making it impossible to break out with special characters.
-			encoded := encodePowerShellScript(attempt)
+			encoded := encodePowerShellScript(tt.script)
 
 			// Verify it's base64 (doesn't contain the original dangerous characters)
 			if strings.Contains(encoded, ";") || strings.Contains(encoded, "|") ||
