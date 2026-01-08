@@ -29,6 +29,6 @@ Thumbs.db
 # Build artifacts
 /bin/
 /dist/
-psrp-client
-psrp-demo
+/psrp-client
+/psrp-demo
 psrp-client-mac

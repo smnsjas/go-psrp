@@ -5,6 +5,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"sync"
@@ -31,6 +32,8 @@ func main() {
 	maxRunspaces := flag.Int("max-runspaces", 2, "Client MaxRunspaces limit (semaphore size)")
 	maxQueue := flag.Int("max-queue", 100, "Client MaxQueueSize limit")
 	sleepSec := flag.Int("sleep", 2, "Seconds to sleep in each request")
+	enableCBT := flag.Bool("cbt", false, "Enable Channel Binding Tokens (CBT) for NTLM (Extended Protection)")
+	logLevel := flag.String("loglevel", "", "Log level: debug, info, warn, error")
 
 	flag.Parse()
 
@@ -61,6 +64,28 @@ func main() {
 	cfg.InsecureSkipVerify = *insecure
 	cfg.MaxRunspaces = *maxRunspaces
 	cfg.MaxQueueSize = *maxQueue
+	cfg.EnableCBT = *enableCBT
+
+	if *logLevel != "" {
+		var level slog.Level
+		switch strings.ToLower(*logLevel) {
+		case "debug":
+			level = slog.LevelDebug
+		case "info":
+			level = slog.LevelInfo
+		case "warn":
+			level = slog.LevelWarn
+		case "error":
+			level = slog.LevelError
+		default:
+			fmt.Fprintf(os.Stderr, "Invalid log level '%s'\n", *logLevel)
+			os.Exit(1)
+		}
+		// Set env var for legacy debug
+		if level == slog.LevelDebug {
+			os.Setenv("PSRP_DEBUG", "1")
+		}
+	}
 
 	if *useTLS {
 		cfg.Port = 5986
@@ -86,6 +111,24 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+
+	if *logLevel != "" {
+		// Re-parse level to create logger (simplified)
+		var level slog.Level
+		switch strings.ToLower(*logLevel) {
+		case "debug":
+			level = slog.LevelDebug
+		case "info":
+			level = slog.LevelInfo
+		case "warn":
+			level = slog.LevelWarn
+		case "error":
+			level = slog.LevelError
+		}
+		logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+		c.SetSlogLogger(logger)
+	}
+
 	defer c.Close(context.Background())
 
 	fmt.Println("Connecting...")
