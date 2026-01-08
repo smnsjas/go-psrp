@@ -368,15 +368,18 @@ func (c *Client) logError(format string, v ...interface{}) {
 // and removing potentially sensitive content.
 func sanitizeScriptForLogging(script string) string {
 	const maxLen = 100
+	
+	// Check for sensitive patterns first (applies to all scripts)
+	if containsSensitivePattern(script) {
+		return "[script contains sensitive data - not logged]"
+	}
+	
+	// If script is short enough, return as-is (already checked for sensitive patterns)
 	if len(script) <= maxLen {
-		// Short scripts are logged directly, but we still need to be careful
-		// Check for common patterns that might contain credentials
-		if containsSensitivePattern(script) {
-			return "[script contains sensitive data - not logged]"
-		}
 		return script
 	}
-	// Long scripts are truncated and marked as such
+	
+	// Long scripts are truncated
 	return script[:maxLen] + "... [truncated]"
 }
 
