@@ -32,3 +32,8 @@ Thumbs.db
 /psrp-client
 /psrp-demo
 psrp-client-mac
+
+# CodeQL
+codeql-db/
+codeql-custom-queries-go/
+*.sarif
