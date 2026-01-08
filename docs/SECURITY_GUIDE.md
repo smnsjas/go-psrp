@@ -9,6 +9,7 @@ This document outlines security considerations and best practices when using the
 **Issue**: Prior versions logged entire PowerShell scripts which could expose credentials in logs.
 
 **Fix**: The library now automatically sanitizes scripts before logging using `sanitizeScriptForLogging()`:
+
 - Scripts containing sensitive patterns (password, credential, secret, apikey, etc.) are redacted
 - Long scripts are truncated to 100 characters
 - The full script is never logged to prevent accidental credential exposure
@@ -28,6 +29,7 @@ This document outlines security considerations and best practices when using the
 ### TLS Configuration
 
 The library enforces secure TLS settings by default:
+
 - **Minimum TLS version**: TLS 1.2
 - **Certificate validation**: Enabled by default
 - **InsecureSkipVerify**: Only for testing, displays prominent warnings
