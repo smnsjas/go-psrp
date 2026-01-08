@@ -12,6 +12,7 @@ require (
 	github.com/alexbrainman/sspi v0.0.0-20250919150558-7d374ff0d59e
 	github.com/go-krb5/krb5 v0.0.0-20251226122733-d0288459fc25
 	github.com/smnsjas/go-ntlm-cbt v0.0.0-20260107203125-46149984fac0
+	github.com/smnsjas/go-psrpcore v0.0.0-20251230192519-bf6b71a48d22
 	golang.org/x/term v0.38.0
 )
 
