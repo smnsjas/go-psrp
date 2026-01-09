@@ -375,6 +375,8 @@ func main() {
 	}
 
 	fmt.Println("Connected!")
+	fmt.Printf("State: %s\n", psrp.State())
+	fmt.Printf("Health: %s\n", psrp.Health())
 
 	// Handle recovery
 	if *recoverCommandID != "" {
