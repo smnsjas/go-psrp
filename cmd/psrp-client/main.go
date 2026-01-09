@@ -84,7 +84,7 @@ func main() {
 	flag.Parse()
 
 	if *logLevel != "" {
-		os.Setenv("PSRP_DEBUG", "1") // Enable legacy debug as well
+		_ = os.Setenv("PSRP_DEBUG", "1") // Enable legacy debug as well
 	}
 
 	fmt.Println("PSRP Client - Codebase Fix v4 (Structured Logging)")
@@ -143,6 +143,8 @@ func main() {
 		if strings.HasPrefix(detectedCache, "API:") {
 			tempCache := fmt.Sprintf("/tmp/psrp_krb5cc_%d", os.Getpid())
 			// Use kcc copy to copy credentials from API cache to file cache (Heimdal command)
+			// Security: detectedCache comes from parsing local 'klist' output, which is considered a trusted source.
+			// #nosec G204 -- klist output is system-generated and trusted for local user context
 			cmd := exec.Command("kcc", "copy", detectedCache, tempCache)
 			if err := cmd.Run(); err == nil {
 				detectedCache = tempCache
