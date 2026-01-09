@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -633,6 +634,10 @@ func (c *Client) SaveState(path string) error {
 
 // LoadState loads a session state from a file.
 func LoadState(path string) (*SessionState, error) {
+	// Security: Clean the path to prevent basic traversal weirdness, though checking '..' is complex
+	// without a root directory constraint. Here we just normalize.
+	path = filepath.Clean(path)
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read state file: %w", err)
