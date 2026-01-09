@@ -67,6 +67,38 @@ const (
 	CloseStrategyForce
 )
 
+// ReconnectPolicy configures automatic reconnection behavior.
+type ReconnectPolicy struct {
+	// Enabled activates automatic reconnection on transient failures.
+	Enabled bool
+
+	// MaxAttempts is the maximum number of reconnection attempts.
+	// 0 means infinite retries.
+	MaxAttempts int
+
+	// InitialDelay is the delay before the first reconnection attempt.
+	InitialDelay time.Duration
+
+	// MaxDelay is the maximum delay between reconnection attempts.
+	// Delays grow exponentially up to this cap.
+	MaxDelay time.Duration
+
+	// Jitter adds randomness to delays to prevent thundering herd.
+	// Value between 0.0 (no jitter) and 1.0 (up to 100% jitter).
+	Jitter float64
+}
+
+// DefaultReconnectPolicy returns a sensible default reconnection policy.
+func DefaultReconnectPolicy() ReconnectPolicy {
+	return ReconnectPolicy{
+		Enabled:      false, // Opt-in
+		MaxAttempts:  5,
+		InitialDelay: 1 * time.Second,
+		MaxDelay:     30 * time.Second,
+		Jitter:       0.2,
+	}
+}
+
 // Config holds configuration for a PSRP client.
 type Config struct {
 	// Port is the WinRM port (default: 5985 for HTTP, 5986 for HTTPS).
@@ -144,6 +176,11 @@ type Config struct {
 	// certificate in NTLM authentication, protecting against NTLM relay attacks.
 	// Requires HTTPS (UseTLS: true). Only applies to NTLM authentication.
 	EnableCBT bool
+
+	// Reconnect configures automatic reconnection behavior.
+	// If Reconnect.Enabled is true, the client will attempt to reconnect
+	// automatically when transient connection failures occur.
+	Reconnect ReconnectPolicy
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -157,6 +194,7 @@ func DefaultConfig() Config {
 		MaxConcurrentCommands: 1,             // Deprecated
 		MaxQueueSize:          -1,            // Unbounded by default
 		RunspaceOpenTimeout:   60 * time.Second,
+		Reconnect:             DefaultReconnectPolicy(),
 	}
 }
 
@@ -233,6 +271,9 @@ type Client struct {
 	// Keepalive management
 	keepAliveDone chan struct{}
 	keepAliveWg   sync.WaitGroup
+
+	// Automatic reconnection
+	reconnectMgr *reconnectManager
 }
 
 // SessionState represents the serialized state of a client session
@@ -980,6 +1021,13 @@ func (c *Client) Connect(ctx context.Context) error {
 		c.logInfoLocked("Keepalive disabled")
 	}
 
+	// Start automatic reconnection manager if enabled
+	if c.config.Reconnect.Enabled {
+		c.reconnectMgr = newReconnectManager(c, c.config.Reconnect)
+		c.reconnectMgr.start()
+		c.logInfoLocked("Automatic reconnection enabled (MaxAttempts: %d)", c.config.Reconnect.MaxAttempts)
+	}
+
 	return nil
 }
 
@@ -1007,6 +1055,10 @@ func (c *Client) CloseWithStrategy(ctx context.Context, strategy CloseStrategy) 
 		c.keepAliveDone = nil
 	}
 
+	// Stop reconnect manager
+	reconnectMgr := c.reconnectMgr
+	c.reconnectMgr = nil
+
 	// Read fields needed for cleanup
 	pool := c.psrpPool
 	backend := c.backend
@@ -1015,6 +1067,11 @@ func (c *Client) CloseWithStrategy(ctx context.Context, strategy CloseStrategy) 
 
 	// Wait for keepalive goroutine to exit (outside lock)
 	c.keepAliveWg.Wait()
+
+	// Stop reconnect manager (outside lock to avoid deadlock)
+	if reconnectMgr != nil {
+		reconnectMgr.stop()
+	}
 
 	// Release all semaphore slots?
 	// The semaphore implementation doesn't support "Close", but blocked Acquire calls
