@@ -1062,6 +1062,43 @@ func (c *Client) State() runspace.State {
 	return c.psrpPool.State()
 }
 
+// HealthStatus represents the high-level health of the client connection.
+type HealthStatus string
+
+const (
+	HealthHealthy   HealthStatus = "Healthy"
+	HealthDegraded  HealthStatus = "Degraded"  // Connected but busy or experiencing issues
+	HealthUnhealthy HealthStatus = "Unhealthy" // Disconnected, Broken, or Closed
+	HealthUnknown   HealthStatus = "Unknown"   // Initializing or unknown state
+)
+
+// Health returns the current high-level health status of the client.
+func (c *Client) Health() HealthStatus {
+	c.mu.Lock()
+	pool := c.psrpPool
+	c.mu.Unlock()
+
+	if pool == nil {
+		return HealthUnknown
+	}
+
+	state := pool.State()
+	switch state {
+	case runspace.StateOpened:
+		// Check availability
+		// If AvailableRunspaces > 0, we can accept new commands immediately.
+		// If 0, we are busy (Degraded).
+		if pool.AvailableRunspaces() > 0 {
+			return HealthHealthy
+		}
+		return HealthDegraded
+	case runspace.StateBeforeOpen, runspace.StateOpening, runspace.StateConnecting:
+		return HealthUnknown
+	default: // Closed, Broken, disconnected
+		return HealthUnhealthy
+	}
+}
+
 // startKeepalive starts the keepalive goroutine if configured.
 // startKeepalive starts the keepalive goroutine if configured.
 func (c *Client) startKeepalive() {
