@@ -1052,6 +1052,16 @@ func (c *Client) IsConnected() bool {
 	return c.connected && !c.closed
 }
 
+// State returns the current connection state of the underlying RunspacePool.
+func (c *Client) State() runspace.State {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.psrpPool == nil {
+		return runspace.StateBeforeOpen
+	}
+	return c.psrpPool.State()
+}
+
 // startKeepalive starts the keepalive goroutine if configured.
 // startKeepalive starts the keepalive goroutine if configured.
 func (c *Client) startKeepalive() {
