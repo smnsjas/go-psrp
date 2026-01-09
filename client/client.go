@@ -1129,7 +1129,7 @@ func (c *Client) keepaliveLoop(interval time.Duration) {
 		c.mu.Lock()
 		doneCh := c.keepAliveDone
 		pool := c.psrpPool
-		poolID := c.poolID
+
 		c.mu.Unlock()
 
 		if doneCh == nil {
@@ -1149,13 +1149,10 @@ func (c *Client) keepaliveLoop(interval time.Duration) {
 			// We use a short timeout so we don't block forever
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 
-			// Send GET_AVAILABLE_RUNSPACES
-			// We use a CallID of 1 for keepalives
-			msg := messages.NewGetAvailableRunspaces(poolID, 1)
-
-			// We call pool.SendMessage directly
+			// Send Keepalive (GET_AVAILABLE_RUNSPACES)
+			// This maintains the session and ensures connectivity.
 			c.logf("Sending Keepalive (GET_AVAILABLE_RUNSPACES)")
-			if err := pool.SendMessage(ctx, msg); err != nil {
+			if err := pool.SendGetAvailableRunspaces(ctx); err != nil {
 				c.logWarn("Keepalive failed: %v", err)
 				// TODO: consider emitting an event or checking if connection is dead
 			}
