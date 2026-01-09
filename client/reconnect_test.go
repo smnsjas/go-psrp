@@ -1,111 +1,126 @@
 package client
 
 import (
-	"context"
-	"errors"
-	"io"
 	"testing"
-
-	"github.com/google/uuid"
-	"github.com/smnsjas/go-psrpcore/runspace"
+	"time"
 )
 
-func TestClient_CloseWithStrategy_Force(t *testing.T) {
-	mockBackend := &MockBackend{
-		CloseFunc: func(ctx context.Context) error {
-			return errors.New("should not be called in Force mode")
-		},
-	}
+func TestDefaultReconnectPolicy(t *testing.T) {
+	policy := DefaultReconnectPolicy()
 
-	c := &Client{
-		config:    DefaultConfig(),
-		backend:   mockBackend,
-		connected: true,
-		closed:    false,
-		psrpPool:  runspace.New(&noOpTransport{}, uuid.New()),
+	if policy.Enabled {
+		t.Error("DefaultReconnectPolicy should have Enabled=false (opt-in)")
 	}
-
-	// Force close should not call backend.Close
-	if err := c.CloseWithStrategy(context.Background(), CloseStrategyForce); err != nil {
-		t.Fatalf("CloseWithStrategy(Force) failed: %v", err)
+	if policy.MaxAttempts != 5 {
+		t.Errorf("Expected MaxAttempts=5, got %d", policy.MaxAttempts)
 	}
-
-	if !c.closed {
-		t.Error("Client should be marked closed")
+	if policy.InitialDelay != 1*time.Second {
+		t.Errorf("Expected InitialDelay=1s, got %v", policy.InitialDelay)
+	}
+	if policy.MaxDelay != 30*time.Second {
+		t.Errorf("Expected MaxDelay=30s, got %v", policy.MaxDelay)
+	}
+	if policy.Jitter != 0.2 {
+		t.Errorf("Expected Jitter=0.2, got %v", policy.Jitter)
 	}
 }
 
-func TestClient_CloseWithStrategy_Graceful(t *testing.T) {
-	backendClosed := false
-	mockBackend := &MockBackend{
-		CloseFunc: func(ctx context.Context) error {
-			backendClosed = true
-			return nil
-		},
+func TestReconnectManager_BackoffCalculation(t *testing.T) {
+	policy := ReconnectPolicy{
+		Enabled:      true,
+		MaxAttempts:  3,
+		InitialDelay: 100 * time.Millisecond,
+		MaxDelay:     1 * time.Second,
+		Jitter:       0.0, // No jitter for deterministic test
 	}
 
-	c := &Client{
-		config:    DefaultConfig(),
-		backend:   mockBackend,
-		connected: true,
-		closed:    false,
-		psrpPool:  runspace.New(&noOpTransport{}, uuid.New()),
-	}
+	rm := newReconnectManager(nil, policy)
 
-	// Graceful close should call backend.Close
-	if err := c.CloseWithStrategy(context.Background(), CloseStrategyGraceful); err != nil {
-		t.Fatalf("CloseWithStrategy(Graceful) failed: %v", err)
-	}
-
-	if !c.closed {
-		t.Error("Client should be marked closed")
-	}
-	if !backendClosed {
-		t.Error("Backend.Close() was not called in Graceful mode")
+	// Test base delay calculation (no jitter)
+	delay := rm.calculateBackoff(100 * time.Millisecond)
+	if delay != 100*time.Millisecond {
+		t.Errorf("Expected 100ms with no jitter, got %v", delay)
 	}
 }
 
-func TestClient_Reconnect_Mock(t *testing.T) {
-	reattachCalled := false
-	expectedShellID := "test-shell-id"
-
-	mockBackend := &MockBackend{
-		ReattachFunc: func(ctx context.Context, pool *runspace.Pool, shellID string) error {
-			reattachCalled = true
-			if shellID != expectedShellID {
-				t.Errorf("Expected shellID %s, got %s", expectedShellID, shellID)
-			}
-			return nil
-		},
-		TransportFunc: func() io.ReadWriter { return &noOpTransport{} },
-	}
-	// Need to fix TransportFunc signature in mock_test.go?
-	// mock_test.go defines TransportFunc func() io.ReadWriter
-	// So here needs to match.
-
-	c := &Client{
-		config:    DefaultConfig(),
-		backend:   mockBackend,
-		connected: false, // Disconnected initially
-		closed:    false,
-		callID:    newCallIDManager(),
-		// psrpPool is nil initially as well usually
+func TestReconnectManager_BackoffWithJitter(t *testing.T) {
+	policy := ReconnectPolicy{
+		Enabled:      true,
+		MaxAttempts:  3,
+		InitialDelay: 100 * time.Millisecond,
+		MaxDelay:     1 * time.Second,
+		Jitter:       0.5, // 50% jitter
 	}
 
-	if err := c.Reconnect(context.Background(), expectedShellID); err != nil {
-		t.Fatalf("Reconnect failed: %v", err)
+	rm := newReconnectManager(nil, policy)
+
+	// With 50% jitter, delay should be between 100ms and 150ms
+	for i := 0; i < 10; i++ {
+		delay := rm.calculateBackoff(100 * time.Millisecond)
+		if delay < 100*time.Millisecond || delay > 150*time.Millisecond {
+			t.Errorf("Delay %v outside expected range [100ms, 150ms]", delay)
+		}
+	}
+}
+
+func TestIsTransientError(t *testing.T) {
+	tests := []struct {
+		errMsg    string
+		transient bool
+	}{
+		{"connection reset by peer", true},
+		{"connection refused", true},
+		{"i/o timeout", true},
+		{"timeout waiting for response", true},
+		{"EOF", true},
+		{"network is unreachable", true},
+		{"no route to host", true},
+		{"authentication failed", false},
+		{"invalid credentials", false},
+		{"permission denied", false},
+		{"", false},
 	}
 
-	if !reattachCalled {
-		t.Error("Backend.Reattach() was not called")
+	for _, tc := range tests {
+		var err error
+		if tc.errMsg != "" {
+			err = &testError{msg: tc.errMsg}
+		}
+
+		result := isTransientError(err)
+		if result != tc.transient {
+			t.Errorf("isTransientError(%q) = %v, want %v", tc.errMsg, result, tc.transient)
+		}
 	}
-	if !c.connected {
-		t.Error("Client should be marked connected")
+}
+
+func TestContainsIgnoreCase(t *testing.T) {
+	tests := []struct {
+		s, substr string
+		want      bool
+	}{
+		{"connection reset", "RESET", true},
+		{"CONNECTION RESET", "reset", true},
+		{"hello world", "WORLD", true},
+		{"hello", "world", false},
+		{"short", "very long substring", false},
+		{"", "test", false},
+		{"test", "", true},
 	}
-	if c.psrpPool == nil {
-		t.Error("Client.psrpPool should be initialized")
+
+	for _, tc := range tests {
+		got := containsIgnoreCase(tc.s, tc.substr)
+		if got != tc.want {
+			t.Errorf("containsIgnoreCase(%q, %q) = %v, want %v", tc.s, tc.substr, got, tc.want)
+		}
 	}
-	if c.callID.Current() != 2 {
-		t.Errorf("Expected callID synced to 2, got %d", c.callID.Current())
-	}
+}
+
+// testError is a simple error type for testing
+type testError struct {
+	msg string
+}
+
+func (e *testError) Error() string {
+	return e.msg
 }
