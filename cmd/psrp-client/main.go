@@ -32,6 +32,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/smnsjas/go-psrp/client"
@@ -77,6 +78,8 @@ func main() {
 	keepAlive := flag.Duration("keepalive", 0, "Keepalive interval (e.g. 30s). 0 to disable.")
 	idleTimeout := flag.String("idle-timeout", "", "WSMan shell idle timeout (ISO8601 duration, e.g. PT1H, PT30M)")
 	enableCBT := flag.Bool("cbt", false, "Enable Channel Binding Tokens (CBT) for NTLM (Extended Protection)")
+	testConcurrency := flag.Int("test-concurrency", 0, "Test semaphore: spawn N concurrent commands (requires -script)")
+	maxRunspaces := flag.Int("max-runspaces", 1, "Max concurrent pipelines (default: 1)")
 
 	flag.Parse()
 
@@ -180,6 +183,7 @@ func main() {
 	cfg.KeepAliveInterval = *keepAlive
 	cfg.IdleTimeout = *idleTimeout
 	cfg.EnableCBT = *enableCBT
+	cfg.MaxRunspaces = *maxRunspaces
 
 	// Kerberos settings apply to both AuthNegotiate (default) and explicit -kerberos
 	cfg.Realm = *realm
@@ -442,6 +446,45 @@ func main() {
 		fmt.Println("\nDisconnected! Command continues running on server.")
 		fmt.Println("To recover output later, run:")
 		fmt.Printf("  ./psrp-client ... -reconnect %s -recover %s -poolid %q\n", shellID, commandID, poolIDVal)
+		return
+	}
+
+	// Handle test-concurrency mode
+	if *testConcurrency > 0 {
+		fmt.Printf("Testing semaphore with %d concurrent commands (MaxRunspaces=%d)...\n", *testConcurrency, *maxRunspaces)
+		fmt.Println("---")
+
+		var wg sync.WaitGroup
+		results := make(chan string, *testConcurrency)
+
+		for i := 0; i < *testConcurrency; i++ {
+			wg.Add(1)
+			go func(id int) {
+				defer wg.Done()
+				start := time.Now()
+				cmdScript := fmt.Sprintf("'Worker %d started'; Start-Sleep 2; 'Worker %d done'", id, id)
+				result, err := psrp.Execute(ctx, cmdScript)
+				elapsed := time.Since(start)
+				if err != nil {
+					results <- fmt.Sprintf("Worker %d: ERROR after %v - %v", id, elapsed, err)
+				} else {
+					results <- fmt.Sprintf("Worker %d: OK after %v - %d outputs", id, elapsed, len(result.Output))
+				}
+			}(i)
+		}
+
+		// Wait for all workers and close channel
+		go func() {
+			wg.Wait()
+			close(results)
+		}()
+
+		// Print results as they arrive
+		for r := range results {
+			fmt.Println(r)
+		}
+		fmt.Println("---")
+		fmt.Println("If MaxRunspaces < test-concurrency, some workers should take longer (queued).")
 		return
 	}
 
