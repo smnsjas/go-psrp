@@ -94,14 +94,37 @@ func (rm *reconnectManager) checkAndReconnect() {
 
 	rm.client.logInfo("Reconnect: detected unhealthy state, attempting reconnection...")
 
+	// Log reconnection attempt (NIST SP 800-92)
+	rm.client.mu.Lock()
+	if rm.client.securityLogger != nil {
+		rm.client.securityLogger.LogReconnection(SubtypeReconnAttempt, OutcomeSuccess, SeverityInfo, map[string]any{
+			"reason": "unhealthy_state",
+		})
+	}
+	rm.client.mu.Unlock()
+
 	ctx, cancel := context.WithTimeout(context.Background(), rm.client.config.Timeout)
 	defer cancel()
 
 	err := rm.attemptReconnectWithBackoff(ctx)
 	if err != nil {
 		rm.client.logError("Reconnect: all attempts failed: %v", err)
+		// Log exhausted (NIST SP 800-92)
+		rm.client.mu.Lock()
+		if rm.client.securityLogger != nil {
+			rm.client.securityLogger.LogReconnection(SubtypeReconnExhausted, OutcomeFailure, SeverityError, map[string]any{
+				"error": err.Error(),
+			})
+		}
+		rm.client.mu.Unlock()
 	} else {
 		rm.client.logInfo("Reconnect: successfully reconnected")
+		// Log success (NIST SP 800-92)
+		rm.client.mu.Lock()
+		if rm.client.securityLogger != nil {
+			rm.client.securityLogger.LogReconnection(SubtypeReconnSuccess, OutcomeSuccess, SeverityInfo, nil)
+		}
+		rm.client.mu.Unlock()
 	}
 }
 
