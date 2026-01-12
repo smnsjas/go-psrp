@@ -80,6 +80,7 @@ func main() {
 	enableCBT := flag.Bool("cbt", false, "Enable Channel Binding Tokens (CBT) for NTLM (Extended Protection)")
 	testConcurrency := flag.Int("test-concurrency", 0, "Test semaphore: spawn N concurrent commands (requires -script)")
 	maxRunspaces := flag.Int("max-runspaces", 1, "Max concurrent pipelines (default: 1)")
+	autoReconnect := flag.Bool("auto-reconnect", false, "Enable automatic reconnection on failures")
 
 	flag.Parse()
 
@@ -186,6 +187,7 @@ func main() {
 	cfg.IdleTimeout = *idleTimeout
 	cfg.EnableCBT = *enableCBT
 	cfg.MaxRunspaces = *maxRunspaces
+	cfg.Reconnect.Enabled = *autoReconnect
 
 	// Kerberos settings apply to both AuthNegotiate (default) and explicit -kerberos
 	cfg.Realm = *realm

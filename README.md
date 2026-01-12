@@ -157,7 +157,9 @@ for output := range stream.Output {
 
 ### Resilience & Reconnection
 
-Disconnect from a session and reconnect later (WSMan only):
+**Manual Reconnection (WSMan only)**
+
+Disconnect from a session and reconnect later:
 
 ```go
 // 1. Disconnect (session keeps running on server)
@@ -168,6 +170,36 @@ err := c.Disconnect(ctx)
 c2, _ := client.New(target, cfg)
 err := c2.Reconnect(ctx, shellID)
 ```
+
+**Automatic Reconnection**
+
+Enable automatic reconnection for transient failures (network issues, VM pause/resume, etc.):
+
+```go
+cfg := client.DefaultConfig()
+// ... auth settings ...
+
+// Enable auto-reconnect
+cfg.Reconnect.Enabled = true
+
+// Optional: Tune retry behavior
+cfg.Reconnect.MaxAttempts = 5              // Max retry attempts (0 = infinite)
+cfg.Reconnect.InitialDelay = 1 * time.Second  // Delay before first retry
+cfg.Reconnect.MaxDelay = 30 * time.Second     // Max delay cap (exponential backoff)
+cfg.Reconnect.Jitter = 0.2                    // Randomness factor (0.0-1.0)
+
+c, _ := client.New(target, cfg)
+c.Connect(ctx)
+
+// Commands automatically retry on transient failures
+result, err := c.Execute(ctx, "Get-Process") // Retries if connection drops mid-command
+```
+
+This is especially useful for:
+
+- **HvSocket** (PowerShell Direct) where VM pause/resume breaks connections
+- **Unstable networks** with intermittent connectivity
+- **Long-running scripts** that need to survive connection hiccups
 
 ### PowerShell Direct (HVSocket) - Windows Only
 
@@ -329,6 +361,7 @@ go build ./cmd/psrp-client
 | `-save-session` | Save session state to file on disconnect | - |
 | `-restore-session` | Restore session state from file | - |
 | `-cbt` | Enable NTLM Channel Binding Tokens (Extended Protection) | `false` |
+| `-auto-reconnect` | Enable automatic reconnection on failures | `false` |
 
 ## Package Structure
 
