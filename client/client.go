@@ -54,6 +54,18 @@ const (
 	TransportHvSocket
 )
 
+// String returns a string representation of the transport type.
+func (t TransportType) String() string {
+	switch t {
+	case TransportWSMan:
+		return "wsman"
+	case TransportHvSocket:
+		return "hvsocket"
+	default:
+		return "unknown"
+	}
+}
+
 // CloseStrategy specifies how the client should be closed.
 type CloseStrategy int
 
@@ -274,6 +286,9 @@ type Client struct {
 
 	// Automatic reconnection
 	reconnectMgr *reconnectManager
+
+	// Security logging (NIST SP 800-92)
+	securityLogger *SecurityLogger
 }
 
 // SessionState represents the serialized state of a client session
@@ -932,6 +947,17 @@ func (c *Client) Connect(ctx context.Context) error {
 	c.poolID = uuid.New()
 	c.logInfoLocked("Initializing new session with PoolID %s", c.poolID)
 
+	// Initialize security logger (NIST SP 800-92)
+	target := c.hostname
+	if c.config.Transport == TransportHvSocket {
+		target = "hvsocket://" + c.config.VMID
+	}
+	c.securityLogger = NewSecurityLogger(c.slogLogger, c.config.Username, target)
+	c.securityLogger.LogConnection(SubtypeConnEstablished, OutcomeSuccess, SeverityInfo, map[string]any{
+		"pool_id":   c.poolID.String(),
+		"transport": c.config.Transport.String(),
+	})
+
 	if c.backendFactory != nil {
 		var err error
 		c.backend, err = c.backendFactory()
@@ -970,6 +996,10 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	// 2. Connect Backend (Prepare Transport)
 	if err := c.backend.Connect(ctx); err != nil {
+		c.securityLogger.LogConnection(SubtypeConnFailed, OutcomeFailure, SeverityError, map[string]any{
+			"error": err.Error(),
+			"stage": "backend_connect",
+		})
 		return fmt.Errorf("connect backend: %w", err)
 	}
 
@@ -1020,8 +1050,17 @@ func (c *Client) Connect(ctx context.Context) error {
 	// 5. Init Backend (Handshake + Shell Creation)
 	// This calls pool.Open() internally after ensuring backend-specific setup (like WSMan Shell creation)
 	if err := c.backend.Init(ctx, c.psrpPool); err != nil {
+		c.securityLogger.LogConnection(SubtypeConnFailed, OutcomeFailure, SeverityError, map[string]any{
+			"error": err.Error(),
+			"stage": "backend_init",
+		})
 		return fmt.Errorf("init backend: %w", err)
 	}
+	// Log successful session establishment
+	c.securityLogger.LogSession(SubtypeSessionOpened, OutcomeSuccess, SeverityInfo, map[string]any{
+		"pool_id":       c.poolID.String(),
+		"max_runspaces": maxRunspaces,
+	})
 
 	// 6. Start dispatch loop for shared transports (HvSocket)
 	// For WSMan, per-pipeline transports are used instead.
@@ -1161,6 +1200,16 @@ func (c *Client) CloseWithStrategy(ctx context.Context, strategy CloseStrategy) 
 			return fmt.Errorf("close backend: %w", err)
 		}
 	}
+
+	// Log session closed (NIST SP 800-92)
+	c.mu.Lock()
+	if c.securityLogger != nil {
+		c.securityLogger.LogSession(SubtypeSessionClosed, OutcomeSuccess, SeverityInfo, map[string]any{
+			"strategy": strategy,
+		})
+		c.securityLogger.LogConnection(SubtypeConnClosed, OutcomeSuccess, SeverityInfo, nil)
+	}
+	c.mu.Unlock()
 
 	return nil
 }
