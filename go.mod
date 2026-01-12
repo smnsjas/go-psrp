@@ -13,19 +13,15 @@ require (
 	github.com/go-krb5/krb5 v0.0.0-20251226122733-d0288459fc25
 	github.com/smnsjas/go-ntlm-cbt v0.0.0-20260107203125-46149984fac0
 	github.com/smnsjas/go-psrpcore v0.0.0-20251230192519-bf6b71a48d22
-	github.com/stretchr/testify v1.11.1
 	golang.org/x/term v0.38.0
 )
 
 require (
-	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/go-crypt/x v0.4.10 // indirect
 	github.com/go-krb5/x v0.3.0 // indirect
-	github.com/pmezard/go-difflib v1.0.0 // indirect
 	golang.org/x/crypto v0.46.0 // indirect
 	golang.org/x/net v0.48.0 // indirect
 	golang.org/x/sys v0.39.0 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
 replace github.com/smnsjas/go-psrpcore => ../go-psrpcore
