@@ -158,16 +158,9 @@ func TestClient_Execute_Mock(t *testing.T) {
 				if !tt.wantErr {
 					t.Errorf("Execute() unexpected error: %v", err)
 				} else {
-					// If we forced an actual error (e.g. from CreatePipeline), check it here
-					if tt.name != "Failure_PipelineFailed" {
-						if tt.wantErrMsg != "" && !strings.Contains(err.Error(), tt.wantErrMsg) {
-							t.Errorf("Execute() error = %v, want substring %q", err, tt.wantErrMsg)
-						}
-					} else {
-						// For Failure_PipelineFailed, we shouldn't get here because Execute suppresses it.
-						// UNLESS Wait() error propagation changed.
-						// Currently Execute logic: returns (res, nil) even if Wait() fails.
-						t.Errorf("Execute() returned error instead of Result with HadErrors: %v", err)
+					// Verify error message contains expected substring
+					if tt.wantErrMsg != "" && !strings.Contains(err.Error(), tt.wantErrMsg) {
+						t.Errorf("Execute() error = %v, want substring %q", err, tt.wantErrMsg)
 					}
 				}
 			case <-time.After(3 * time.Second):

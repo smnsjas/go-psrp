@@ -167,13 +167,10 @@ func (rm *reconnectManager) attemptReconnect(ctx context.Context) error {
 	}
 	c.mu.Unlock()
 
-	if shellID != "" {
-		// WSMan transport - use existing Reconnect
-		return c.Reconnect(ctx, shellID)
-	}
-
-	// HvSocket or no shell - try Connect
-	return c.Connect(ctx)
+	// Always use Reconnect, not Connect.
+	// Connect() checks c.connected and returns nil if already connected,
+	// but Reconnect() properly resets the pool even when c.connected is true.
+	return c.Reconnect(ctx, shellID)
 }
 
 // calculateBackoff returns the delay with optional jitter.

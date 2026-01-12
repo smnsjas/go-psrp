@@ -125,19 +125,40 @@ func (b *HvSocketBackend) ShellID() string {
 // Reattach connects to an existing runspace pool on the VM.
 // shellID is ignored for HvSocket as the connection is defined by VMID/ConfigName.
 func (b *HvSocketBackend) Reattach(ctx context.Context, pool *runspace.Pool, _ string) error {
+	// For HvSocket, Reattach implies ensuring a specified connection to the VM is working.
+	// If the client logic decided to reconnect, it implies the previous connection is broken.
+	// We proactively reset the connection to ensure we get a fresh socket.
+	b.mu.Lock()
+	if b.connected {
+		hvDebugf("[reattach] Resetting existing connection to force fresh socket")
+		if b.conn != nil {
+			_ = b.conn.Close()
+		}
+		b.connected = false
+		b.adapter = nil // Adapter will be recreated in Connect
+	}
+	b.mu.Unlock()
+
 	// 1. Establish socket connection if needed
 	if err := b.Connect(ctx); err != nil {
 		return fmt.Errorf("connect socket: %w", err)
 	}
 
-	// 2. Perform PSRP Reconnection Handshake
-	// pool.Connect sends SESSION_CAPABILITY + CONNECT_RUNSPACEPOOL
-	// and waits for RUNSPACEPOOL_STATE=Opened.
-	hvDebugf("Performing PSRP reconnection handshake...")
-	if err := pool.Connect(ctx); err != nil {
-		return fmt.Errorf("pool connect: %w", err)
+	// Update the pool's transport to use the new adapter!
+	// This is critical because the pool was likely created with a nil or stale adapter
+	// in Client.Reconnect.
+	pool.SetTransport(b.adapter)
+
+	// 2. Perform PSRP handshake
+	// For HvSocket, the server-side session is typically destroyed when the connection breaks
+	// (e.g., VM pause). We need to create a NEW session using Open(), not reconnect to an
+	// existing one using Connect(). Connect() sends CONNECT_RUNSPACEPOOL which the server
+	// won't recognize if the old session is gone.
+	hvDebugf("Performing PSRP session establishment (Open)...")
+	if err := pool.Open(ctx); err != nil {
+		return fmt.Errorf("pool open: %w", err)
 	}
-	hvDebugf("PSRP reconnection successful")
+	hvDebugf("PSRP session established successfully")
 
 	return nil
 }

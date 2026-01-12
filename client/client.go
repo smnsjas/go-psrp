@@ -405,6 +405,64 @@ func (c *Client) logError(format string, v ...interface{}) {
 	}
 }
 
+// isPoolBrokenError checks if an error indicates the pool is broken.
+func (c *Client) isPoolBrokenError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	errStr := err.Error()
+
+	// Check for runspace pool broken error patterns
+	brokenPatterns := []string{
+		"runspace pool broken",
+		"runspace pool is broken",
+		"pool broken",
+		"connection was aborted",
+		"wsarecv:",
+		"wsasend:",
+	}
+
+	for _, pattern := range brokenPatterns {
+		if containsIgnoreCase(errStr, pattern) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// waitForRecovery waits for the connection to recover after a pool broken error.
+// It polls the Health() status waiting for it to return to Healthy or Degraded.
+// Returns true if recovery succeeded, false on timeout.
+func (c *Client) waitForRecovery(ctx context.Context, timeout time.Duration) bool {
+	c.logInfo("Waiting for connection recovery (timeout: %v)...", timeout)
+
+	deadline := time.Now().Add(timeout)
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-ticker.C:
+			health := c.Health()
+			c.logf("Recovery check: Health=%s", health)
+
+			if health == HealthHealthy || health == HealthDegraded {
+				c.logInfo("Connection recovered! Health=%s", health)
+				return true
+			}
+
+			if time.Now().After(deadline) {
+				c.logWarn("Recovery timeout: Health=%s", health)
+				return false
+			}
+		}
+	}
+}
+
 // sanitizeScriptForLogging truncates and sanitizes scripts for safe logging.
 // It prevents accidental credential exposure in logs by truncating long scripts
 // and removing potentially sensitive content.
@@ -1300,19 +1358,93 @@ type Result struct {
 func (c *Client) Execute(ctx context.Context, script string) (*Result, error) {
 	c.logInfo("Execute called: '%s'", sanitizeScriptForLogging(script))
 
-	// Delegate to ExecuteStream
+	maxAttempts := 1 // Default: no retry
+	if c.config.Reconnect.Enabled && c.config.Reconnect.MaxAttempts > 0 {
+		maxAttempts = c.config.Reconnect.MaxAttempts
+	}
+
+	delay := c.config.Reconnect.InitialDelay
+	if delay == 0 {
+		delay = 1 * time.Second
+	}
+
+	var lastErr error
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		result, err := c.executeOnce(ctx, script)
+		if err == nil {
+			return result, nil // Success
+		}
+
+		lastErr = err
+
+		// Check if this is a pool broken error (HvSocket disconnect)
+		isPoolBroken := c.isPoolBrokenError(err)
+
+		// Check if error is transient or pool broken and we should retry
+		if !isTransientError(err) && !isPoolBroken {
+			c.logError("Execute failed (non-recoverable): %v", err)
+			return nil, err
+		}
+
+		if attempt >= maxAttempts {
+			c.logError("Execute failed (max attempts %d reached): %v", maxAttempts, err)
+			return nil, err
+		}
+
+		if isPoolBroken && c.config.Reconnect.Enabled {
+			c.logWarn("Execute attempt %d/%d: pool broken, waiting for reconnection...",
+				attempt, maxAttempts)
+
+			// Wait for the reconnect manager to recover the connection
+			recoveryTimeout := delay * time.Duration(maxAttempts)
+			if recoveryTimeout < 10*time.Second {
+				recoveryTimeout = 10 * time.Second // Minimum 10s for recovery
+			}
+
+			if recovered := c.waitForRecovery(ctx, recoveryTimeout); recovered {
+				c.logInfo("Execute: connection recovered, retrying command")
+				delay = c.config.Reconnect.InitialDelay
+				if delay == 0 {
+					delay = 1 * time.Second
+				}
+				continue
+			}
+			c.logError("Execute: connection did not recover within timeout")
+			return nil, err
+		}
+
+		c.logWarn("Execute attempt %d/%d failed (transient): %v, retrying in %v",
+			attempt, maxAttempts, err, delay)
+
+		// Wait before retry
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(delay):
+		}
+
+		// Exponential backoff
+		delay = time.Duration(float64(delay) * 2)
+		if delay > c.config.Reconnect.MaxDelay {
+			delay = c.config.Reconnect.MaxDelay
+		}
+	}
+
+	return nil, lastErr
+}
+
+// executeOnce performs a single command execution attempt including waiting for results.
+func (c *Client) executeOnce(ctx context.Context, script string) (*Result, error) {
 	streamResult, err := c.ExecuteStream(ctx, script)
 	if err != nil {
 		return nil, err
 	}
 
-	// Wait for results
-	// We need to consume the streams to populate the Result struct.
-	// But ExecuteStream returns channels. We can use a helper or do it here.
-
+	// Wait for results - consume streams into slices
 	var (
 		output      []interface{}
-		errorsList  []interface{} // Rename to avoid conflict with errors package
+		errorsList  []interface{}
 		warnings    []interface{}
 		verbose     []interface{}
 		debug       []interface{}
@@ -1330,31 +1462,17 @@ func (c *Client) Execute(ctx context.Context, script string) (*Result, error) {
 			if msg == nil {
 				continue
 			}
-			// Deserialize Payload
 			deser := serialization.NewDeserializer()
 			results, err := deser.Deserialize(msg.Data)
-			// defer deser.Close() // Can't defer inside loop
 			if err != nil {
-				// We can't return error from goroutine easily, log or append to string error list?
-				// For now just append the error object itself if possible or ignore bad objects?
 				continue
 			}
 			*target = append(*target, results...)
 		}
 	}
 
-	// Consume all channels
-	// Note: We need to pass valid pointers to slices.
-	// Slices are pointers effectively, but appending creates new slice headers.
-	// So we need pointer to slice.
-	// But `collect` takes `*[]interface{}`.
-
-	// Output
 	go collect(streamResult.Output, &output)
-
-	// Errors (special handling: messages.Message for Error might contain ErrorRecord or Exception)
 	go collect(streamResult.Errors, &errorsList)
-
 	go collect(streamResult.Warnings, &warnings)
 	go collect(streamResult.Verbose, &verbose)
 	go collect(streamResult.Debug, &debug)
@@ -1365,13 +1483,13 @@ func (c *Client) Execute(ctx context.Context, script string) (*Result, error) {
 	runErr := streamResult.Wait()
 	wg.Wait()
 
-	// Check if there were errors
-	hadErrors := runErr != nil || len(errorsList) > 0
-
-	// If pipeline failed (runErr) and no error records were received, append the error message
-	if runErr != nil && len(errorsList) == 0 {
-		errorsList = append(errorsList, runErr.Error())
+	// If Wait() returned an error, propagate it for retry handling
+	if runErr != nil {
+		return nil, runErr
 	}
+
+	// Check if there were errors
+	hadErrors := len(errorsList) > 0
 
 	return &Result{
 		Output:      output,
@@ -1736,21 +1854,33 @@ func (c *Client) Reconnect(ctx context.Context, shellID string) error {
 	}
 
 	// 2. Call Reattach on the backend
-	if c.psrpPool == nil {
-		// Do NOT overwrite c.poolID with uuid.New() here.
-		// It is initialized in New() and potentially updated via SetPoolID().
-		// We must use the correct PoolID for reconnection.
+	// 2. Call Reattach on the backend
+	// We MUST create a new RunspacePool instance because Pool objects are single-use (cannot be re-opened).
+	// Even for reconnection, we start a fresh PSRP state machine.
 
-		// We need the transport from the backend
-		transport := c.backend.Transport()
-		if t, ok := transport.(*powershell.WSManTransport); ok {
-			t.SetContext(ctx)
-		}
-		c.psrpPool = runspace.New(transport, c.poolID)
-		if os.Getenv("PSRP_DEBUG") != "" {
-			c.psrpPool.EnableDebugLogging()
-		}
+	// Get transport from backend
+	transport := c.backend.Transport()
+	if t, ok := transport.(*powershell.WSManTransport); ok {
+		t.SetContext(ctx)
 	}
+
+	// Create new pool
+	c.psrpPool = runspace.New(transport, c.poolID)
+
+	// Configure logging
+	if c.slogLogger != nil {
+		c.psrpPool.SetSlogLogger(c.slogLogger)
+	} else if os.Getenv("PSRP_DEBUG") != "" || os.Getenv("PSRP_LOG_LEVEL") != "" {
+		c.psrpPool.EnableDebugLogging()
+	}
+
+	// Configure pool size
+	maxRunspaces := c.config.MaxRunspaces
+	if maxRunspaces <= 0 {
+		maxRunspaces = 1
+	}
+	c.psrpPool.SetMinRunspaces(1)
+	c.psrpPool.SetMaxRunspaces(maxRunspaces)
 
 	if err := c.backend.Reattach(ctx, c.psrpPool, shellID); err != nil {
 		return fmt.Errorf("backend reattach: %w", err)
