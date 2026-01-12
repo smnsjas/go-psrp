@@ -123,21 +123,44 @@ func main() {
 		out, err := exec.Command("klist", "-l").Output()
 		if err == nil {
 			lines := strings.Split(string(out), "\n")
+			var bestCache string
+
 			for _, line := range lines {
-				// Look for API: cache entries (first non-header line with API:)
-				if strings.Contains(line, "API:") {
-					fields := strings.Fields(line)
-					for _, f := range fields {
-						if strings.HasPrefix(f, "API:") {
-							detectedCache = f
-							break
-						}
-					}
-					if detectedCache != "" {
+				// Skip headers and empty lines
+				if !strings.Contains(line, "API:") {
+					continue
+				}
+
+				// Check if this line is the active cache (starts with *)
+				isActive := strings.TrimSpace(line)[0] == '*'
+
+				// Parse fields to find API: identifier
+				fields := strings.Fields(line)
+				var apiCache string
+				for _, f := range fields {
+					if strings.HasPrefix(f, "API:") {
+						apiCache = f
 						break
 					}
 				}
+
+				if apiCache == "" {
+					continue
+				}
+
+				// If active, this is the one we want absolutely.
+				if isActive {
+					bestCache = apiCache
+					break
+				}
+
+				// Otherwise, if we haven't found a best one yet, keeping looking,
+				// but check if it's expired.
+				if bestCache == "" && !strings.Contains(line, ">>> Expired <<<") {
+					bestCache = apiCache
+				}
 			}
+			detectedCache = bestCache
 		}
 
 		// If we found an API: cache, export it to a temp file (gokrb5 can't read API caches)
