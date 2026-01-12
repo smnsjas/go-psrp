@@ -145,7 +145,7 @@ func TestPipeline_Methods(t *testing.T) {
 
 	adapter := p.GetAdapter()
 	if adapter == nil {
-		t.Error("GetAdapter returned nil")
+		t.Fatal("GetAdapter returned nil")
 	}
 	if adapter.commandID != "cmd-id" {
 		t.Errorf("Adapter commandID = %q, want cmd-id", adapter.commandID)

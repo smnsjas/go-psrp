@@ -13,8 +13,3 @@ type Selector struct {
 	Name  string `xml:"Name,attr"`
 	Value string `xml:",chardata"`
 }
-
-// SelectorSet wrapper for XML parsing
-type selectorSet struct {
-	Selectors []Selector `xml:"Selector"`
-}

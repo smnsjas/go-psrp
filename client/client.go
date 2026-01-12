@@ -1219,14 +1219,6 @@ func (c *Client) Health() HealthStatus {
 	}
 }
 
-// startKeepalive starts the keepalive goroutine if configured.
-// startKeepalive starts the keepalive goroutine if configured.
-func (c *Client) startKeepalive() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.startKeepaliveLocked()
-}
-
 // startKeepaliveLocked starts the keepalive goroutine (caller must hold c.mu).
 func (c *Client) startKeepaliveLocked() {
 	interval := c.config.KeepAliveInterval

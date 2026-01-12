@@ -3,7 +3,6 @@ package client
 import (
 	"context"
 	"errors"
-	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -24,7 +23,6 @@ type poolSemaphore struct {
 	queueSize int32 // atomic
 	maxQueue  int
 	timeout   time.Duration
-	mu        sync.RWMutex
 }
 
 // newPoolSemaphore creates a new semaphore with the given limits.
