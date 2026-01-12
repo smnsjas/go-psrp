@@ -296,16 +296,16 @@ func makeFragment(blob []byte) []byte {
 	return append(header, blob...)
 }
 
-func sendState(t *testing.T, w io.Writer, rState messages.RunspacePoolState, pState messages.PipelineState, err error) {
+func sendState(t *testing.T, w io.Writer, _ messages.RunspacePoolState, pState messages.PipelineState, _ error) {
 	// For unit tests, go-psrpcore supports sending a simple int32 as the state
 	// See pipeline.go HandleMessage for MessageTypePipelineState
 
 	val := int32(pState)
 
 	ser := serialization.NewSerializer()
-	objBytes, err := ser.Serialize(val)
-	if err != nil {
-		t.Fatalf("serialize state: %v", err)
+	objBytes, serErr := ser.Serialize(val)
+	if serErr != nil {
+		t.Fatalf("serialize state: %v", serErr)
 	}
 
 	msg := &messages.Message{
@@ -347,29 +347,6 @@ func sendMsg(t *testing.T, w io.Writer, msg *messages.Message) {
 	if err != nil {
 		t.Fatalf("write fragment: %v", err)
 	}
-}
-
-func sendUnencryptedMsg(t *testing.T, w io.Writer, msgType messages.MessageType, obj interface{}) {
-	// For SessionCapability and InitRunspacePool, they are just XML objects (CLIXML)?
-	// No, PSRP messages are specialized.
-	// But go-psrpcore/messages uses `Data` as bytes.
-	// We need to serialize the object to CLIXML or whatever payload expected.
-	// SessionCapability is usually CLIXML.
-
-	ser := serialization.NewSerializer()
-	data, err := ser.Serialize(obj)
-	if err != nil {
-		t.Fatalf("serialize obj: %v", err)
-	}
-
-	msg := &messages.Message{
-		Destination: messages.DestinationClient,
-		Type:        msgType,
-		RunspaceID:  uuid.New(),
-		PipelineID:  uuid.Nil,
-		Data:        data,
-	}
-	sendMsg(t, w, msg)
 }
 
 // TestClient_ExecuteAsync_Mock tests detached execution logic.
