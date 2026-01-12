@@ -8,8 +8,6 @@ import (
 
 	"github.com/smnsjas/go-psrp/powershell"
 	"github.com/smnsjas/go-psrpcore/runspace"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 type spyTransport struct {
@@ -66,7 +64,9 @@ func TestClient_Keepalive(t *testing.T) {
 	}
 
 	c, err := New("host", cfg)
-	require.NoError(t, err)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
 
 	// Inject mock backend via factory
 	c.backendFactory = func() (powershell.RunspaceBackend, error) {
@@ -111,11 +111,15 @@ func TestClient_Keepalive(t *testing.T) {
 	select {
 	case data := <-transport.writes:
 		// We received something!
-		assert.NotEmpty(t, data)
+		if len(data) == 0 {
+			t.Error("received empty data, expected keepalive message")
+		}
 		// PSRP sends fragments, not raw messages.
 		// Fragment header is 21 bytes (8+8+1+4).
 		// We just verify we received a valid-looking chunk of data.
-		assert.GreaterOrEqual(t, len(data), 21, "Should receive at least a fragment header")
+		if len(data) < 21 {
+			t.Errorf("received %d bytes, expected at least 21 bytes for fragment header", len(data))
+		}
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("Timeout waiting for keepalive message")
 	}

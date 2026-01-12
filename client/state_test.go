@@ -7,14 +7,14 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/smnsjas/go-psrpcore/runspace"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestClient_State(t *testing.T) {
 	// 1. Initial State (No Pool)
 	c := &Client{}
-	assert.Equal(t, runspace.StateBeforeOpen, c.State())
+	if got := c.State(); got != runspace.StateBeforeOpen {
+		t.Errorf("State() = %v, want %v", got, runspace.StateBeforeOpen)
+	}
 
 	// 2. Mock Pool State
 	// We can't easily mock runspace.Pool state directly as fields are private
@@ -22,7 +22,9 @@ func TestClient_State(t *testing.T) {
 	transport := &struct{ io.ReadWriter }{} // Dummy
 	pool := runspace.New(transport, uuid.New())
 	c.psrpPool = pool
-	assert.Equal(t, runspace.StateBeforeOpen, c.State())
+	if got := c.State(); got != runspace.StateBeforeOpen {
+		t.Errorf("State() = %v, want %v", got, runspace.StateBeforeOpen)
+	}
 
 	// We can't transition mock pool easily without full handshake simulation
 	// covered in integration tests
@@ -31,13 +33,17 @@ func TestClient_State(t *testing.T) {
 func TestClient_Health(t *testing.T) {
 	// 1. Initial State (Unknown)
 	c := &Client{}
-	assert.Equal(t, HealthUnknown, c.Health())
+	if got := c.Health(); got != HealthUnknown {
+		t.Errorf("Health() = %v, want %v", got, HealthUnknown)
+	}
 
 	// 2. Prepared State (Unknown)
 	transport := &spyTransport{writes: make(chan []byte, 10)}
 	pool := runspace.New(transport, uuid.New())
 	c.psrpPool = pool
-	assert.Equal(t, HealthUnknown, c.Health())
+	if got := c.Health(); got != HealthUnknown {
+		t.Errorf("Health() = %v, want %v", got, HealthUnknown)
+	}
 
 	// 3. Forced Opened State (Degraded because available=0)
 	// We use the SkipHandshakeSend trick
@@ -46,11 +52,17 @@ func TestClient_Health(t *testing.T) {
 	// which launches a goroutine reading from transport.
 	// Our spyTransport blocks Read, which is fine.
 	err := c.psrpPool.Connect(context.Background())
-	require.NoError(t, err)
+	if err != nil {
+		t.Fatalf("psrpPool.Connect() error = %v", err)
+	}
 
-	assert.Equal(t, runspace.StateOpened, c.State())
+	if got := c.State(); got != runspace.StateOpened {
+		t.Errorf("State() = %v, want %v", got, runspace.StateOpened)
+	}
 	// Default available runspaces is 0
-	assert.Equal(t, HealthDegraded, c.Health())
+	if got := c.Health(); got != HealthDegraded {
+		t.Errorf("Health() = %v, want %v", got, HealthDegraded)
+	}
 
 	// Note: To test 'Healthy', we would need to mock the server sending a RUNSPACE_AVAILABILITY message.
 	// That ends up being a functional test of runspace.Pool, not just Client.Health logic.
