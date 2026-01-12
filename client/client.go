@@ -54,15 +54,22 @@ const (
 	TransportHvSocket
 )
 
+// Transport name string constants (for serialization/logging)
+const (
+	TransportNameWSMan    = "wsman"
+	TransportNameHvSocket = "hvsocket"
+	TransportNameUnknown  = "unknown"
+)
+
 // String returns a string representation of the transport type.
 func (t TransportType) String() string {
 	switch t {
 	case TransportWSMan:
-		return "wsman"
+		return TransportNameWSMan
 	case TransportHvSocket:
-		return "hvsocket"
+		return TransportNameHvSocket
 	default:
-		return "unknown"
+		return TransportNameUnknown
 	}
 }
 
@@ -556,7 +563,7 @@ func (c *Client) ReconnectSession(ctx context.Context, state *SessionState) erro
 	// 2. Initialize Backend based on Transport
 	c.logInfoLocked("ReconnectSession: Restoring transport %s", state.Transport)
 	switch state.Transport {
-	case "hvsocket": // TransportHvSocket string representation
+	case TransportNameHvSocket:
 		// Update config to match state
 		c.config.Transport = TransportHvSocket
 
@@ -714,11 +721,11 @@ func (c *Client) SaveState(path string) error {
 
 	// Transport specific info
 	if c.config.Transport == TransportHvSocket {
-		state.Transport = "hvsocket"
+		state.Transport = TransportNameHvSocket
 		state.VMID = c.config.VMID
 		state.ServiceID = c.config.ConfigurationName // Using config name as ServiceID proxy/context
 	} else {
-		state.Transport = "wsman"
+		state.Transport = TransportNameWSMan
 		if c.backend != nil {
 			state.ShellID = c.backend.ShellID()
 		}
