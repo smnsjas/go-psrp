@@ -318,7 +318,8 @@ func (c *Client) SetSlogLogger(logger *slog.Logger) {
 
 	// Propagate to pool if already exists
 	if c.psrpPool != nil {
-		c.psrpPool.SetSlogLogger(logger)
+		// Ignore error - pool may already be opened, logger will just not be set
+		_ = c.psrpPool.SetSlogLogger(logger) //nolint:errcheck // Best-effort logging config
 	}
 }
 
@@ -599,11 +600,12 @@ func (c *Client) ReconnectSession(ctx context.Context, state *SessionState) erro
 			c.psrpPool = runspace.New(transport, c.poolID)
 			c.ensureLogger()
 			if c.slogLogger != nil {
-				c.psrpPool.SetSlogLogger(c.slogLogger)
+				_ = c.psrpPool.SetSlogLogger(c.slogLogger) //nolint:errcheck // Best-effort logging config
 			}
 		}
 
 		// Sync message ID (critical for determining next PSRP message ID)
+		// #nosec G115 -- callID is always positive, starts at 0
 		c.psrpPool.SetMessageID(uint64(c.callID.Current()))
 
 		// Check if we are doing file-based recovery (OutputPaths present)
@@ -657,7 +659,7 @@ func (c *Client) ReconnectSession(ctx context.Context, state *SessionState) erro
 			c.psrpPool = runspace.New(transport, c.poolID)
 			c.ensureLogger()
 			if c.slogLogger != nil {
-				c.psrpPool.SetSlogLogger(c.slogLogger)
+				_ = c.psrpPool.SetSlogLogger(c.slogLogger) //nolint:errcheck // Best-effort logging config
 			}
 		}
 
@@ -682,6 +684,7 @@ func (c *Client) ReconnectSession(ctx context.Context, state *SessionState) erro
 		}
 
 		// Ensure pool uses the correct message ID
+		// #nosec G115 -- callID is always positive, starts at 0
 		c.psrpPool.SetMessageID(uint64(c.callID.Current()))
 
 		return nil
@@ -1018,7 +1021,7 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	// Propagate logger if configured
 	if c.slogLogger != nil {
-		c.psrpPool.SetSlogLogger(c.slogLogger)
+		_ = c.psrpPool.SetSlogLogger(c.slogLogger) //nolint:errcheck // Best-effort logging config
 	} else if os.Getenv("PSRP_DEBUG") != "" || os.Getenv("PSRP_LOG_LEVEL") != "" {
 		// Enable debug logging if PSRP_DEBUG is set (legacy fallback) or PSRP_LOG_LEVEL is set
 		c.psrpPool.EnableDebugLogging()
@@ -1035,8 +1038,9 @@ func (c *Client) Connect(ctx context.Context) error {
 		maxRunspaces = 1
 	}
 
-	c.psrpPool.SetMinRunspaces(1)
-	c.psrpPool.SetMaxRunspaces(maxRunspaces)
+	// Pool configuration errors can only occur if called after Open(), which hasn't happened yet
+	_ = c.psrpPool.SetMinRunspaces(1)            //nolint:errcheck // Called before Open()
+	_ = c.psrpPool.SetMaxRunspaces(maxRunspaces) //nolint:errcheck // Called before Open()
 	c.logInfoLocked("Configured RunspacePool with MaxRunspaces=%d", maxRunspaces)
 
 	// Ensure semaphore matches
@@ -1569,6 +1573,7 @@ func (c *Client) startPipeline(ctx context.Context, script string) (*pipeline.Pi
 	}
 
 	// Prepare payload
+	// #nosec G115 -- callID is always positive, starts at 0
 	msgID := uint64(callID.Next())
 	createPipelineData, err := psrpPipeline.GetCreatePipelineDataWithID(msgID)
 	if err != nil {
@@ -1689,6 +1694,7 @@ func (c *Client) executeAsyncHvSocket(ctx context.Context, script string) (strin
 
 	// Let's keep manual logic for HvSocket to avoid regressions, just extract it.
 
+	// #nosec G115 -- callID is always positive, starts at 0
 	msgID := uint64(c.callID.Next())
 	createPipelineData, err := psrpPipeline.GetCreatePipelineDataWithID(msgID)
 	if err != nil {
@@ -1910,7 +1916,7 @@ func (c *Client) Reconnect(ctx context.Context, shellID string) error {
 
 	// Configure logging
 	if c.slogLogger != nil {
-		c.psrpPool.SetSlogLogger(c.slogLogger)
+		_ = c.psrpPool.SetSlogLogger(c.slogLogger) //nolint:errcheck // Best-effort logging config
 	} else if os.Getenv("PSRP_DEBUG") != "" || os.Getenv("PSRP_LOG_LEVEL") != "" {
 		c.psrpPool.EnableDebugLogging()
 	}
@@ -1920,8 +1926,8 @@ func (c *Client) Reconnect(ctx context.Context, shellID string) error {
 	if maxRunspaces <= 0 {
 		maxRunspaces = 1
 	}
-	c.psrpPool.SetMinRunspaces(1)
-	c.psrpPool.SetMaxRunspaces(maxRunspaces)
+	_ = c.psrpPool.SetMinRunspaces(1)            //nolint:errcheck // Called before Open()
+	_ = c.psrpPool.SetMaxRunspaces(maxRunspaces) //nolint:errcheck // Called before Open()
 
 	if err := c.backend.Reattach(ctx, c.psrpPool, shellID); err != nil {
 		return fmt.Errorf("backend reattach: %w", err)
