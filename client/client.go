@@ -605,6 +605,24 @@ func (c *Client) ReconnectSession(ctx context.Context, state *SessionState) erro
 		if c.psrpPool == nil {
 			transport := backend.Transport()
 			c.psrpPool = runspace.New(transport, c.poolID)
+			// Hook up security logging from protocol layer
+			c.psrpPool.SetSecurityEventCallback(func(event string, details map[string]any) {
+				if c.securityLogger != nil {
+					subtype, ok := details["subtype"].(string)
+					if !ok {
+						subtype = "unknown"
+					}
+					outcome, ok := details["outcome"].(string)
+					if !ok {
+						outcome = "unknown"
+					}
+					severity := SeverityInfo
+					if outcome == "failure" {
+						severity = SeverityError
+					}
+					c.securityLogger.LogEvent(event, subtype, severity, outcome, details)
+				}
+			})
 			c.ensureLogger()
 			if c.slogLogger != nil {
 				_ = c.psrpPool.SetSlogLogger(c.slogLogger) //nolint:errcheck // Best-effort logging config
@@ -664,6 +682,24 @@ func (c *Client) ReconnectSession(ctx context.Context, state *SessionState) erro
 				t.SetContext(ctx)
 			}
 			c.psrpPool = runspace.New(transport, c.poolID)
+			// Hook up security logging from protocol layer
+			c.psrpPool.SetSecurityEventCallback(func(event string, details map[string]any) {
+				if c.securityLogger != nil {
+					subtype, ok := details["subtype"].(string)
+					if !ok {
+						subtype = "unknown"
+					}
+					outcome, ok := details["outcome"].(string)
+					if !ok {
+						outcome = "unknown"
+					}
+					severity := SeverityInfo
+					if outcome == "failure" {
+						severity = SeverityError
+					}
+					c.securityLogger.LogEvent(event, subtype, severity, outcome, details)
+				}
+			})
 			c.ensureLogger()
 			if c.slogLogger != nil {
 				_ = c.psrpPool.SetSlogLogger(c.slogLogger) //nolint:errcheck // Best-effort logging config
@@ -1422,9 +1458,30 @@ func (c *Client) Execute(ctx context.Context, script string) (*Result, error) {
 
 	var lastErr error
 
+	// Security Logging (Start)
+	if c.securityLogger != nil {
+		c.securityLogger.LogCommand(SubtypeCommandExecute, OutcomeAttempt, SeverityInfo, map[string]any{
+			"script": sanitizeScriptForLogging(script),
+		})
+	}
+
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		result, err := c.executeOnce(ctx, script)
 		if err == nil {
+			// Security Logging (Success)
+			if c.securityLogger != nil {
+				hadErrors := result.HadErrors
+				outcome := OutcomeSuccess
+				severity := SeverityInfo
+				if hadErrors {
+					outcome = OutcomeFailure
+					severity = SeverityWarning
+				}
+				c.securityLogger.LogCommand(SubtypeCommandComplete, outcome, severity, map[string]any{
+					"had_errors": hadErrors,
+					"attempts":   attempt,
+				})
+			}
 			return result, nil // Success
 		}
 
@@ -1436,17 +1493,39 @@ func (c *Client) Execute(ctx context.Context, script string) (*Result, error) {
 		// Check if error is transient or pool broken and we should retry
 		if !isTransientError(err) && !isPoolBroken {
 			c.logError("Execute failed (non-recoverable): %v", err)
+			// Security Logging (Failure)
+			if c.securityLogger != nil {
+				c.securityLogger.LogCommand(SubtypeCommandFailed, OutcomeFailure, SeverityError, map[string]any{
+					"error":    err.Error(),
+					"attempts": attempt,
+				})
+			}
 			return nil, err
 		}
 
 		if attempt >= maxAttempts {
 			c.logError("Execute failed (max attempts %d reached): %v", maxAttempts, err)
+			// Security Logging (Failure - Max Attempts)
+			if c.securityLogger != nil {
+				c.securityLogger.LogCommand(SubtypeCommandFailed, OutcomeFailure, SeverityError, map[string]any{
+					"error":        err.Error(),
+					"attempts":     attempt,
+					"max_attempts": maxAttempts,
+				})
+			}
 			return nil, err
 		}
 
 		if isPoolBroken && c.config.Reconnect.Enabled {
 			c.logWarn("Execute attempt %d/%d: pool broken, waiting for reconnection...",
 				attempt, maxAttempts)
+
+			// Security Logging (Reconnection Start)
+			if c.securityLogger != nil {
+				c.securityLogger.LogEvent(EventReconnection, "start", SeverityWarning, OutcomeAttempt, map[string]any{
+					"reason": "pool_broken",
+				})
+			}
 
 			// Wait for the reconnect manager to recover the connection
 			recoveryTimeout := delay * time.Duration(maxAttempts)
@@ -1456,6 +1535,12 @@ func (c *Client) Execute(ctx context.Context, script string) (*Result, error) {
 
 			if recovered := c.waitForRecovery(ctx, recoveryTimeout); recovered {
 				c.logInfo("Execute: connection recovered, retrying command")
+
+				// Security Logging (Reconnection Success)
+				if c.securityLogger != nil {
+					c.securityLogger.LogEvent(EventReconnection, "success", SeverityInfo, OutcomeSuccess, nil)
+				}
+
 				delay = c.config.Reconnect.InitialDelay
 				if delay == 0 {
 					delay = 1 * time.Second
