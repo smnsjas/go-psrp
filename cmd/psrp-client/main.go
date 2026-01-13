@@ -92,6 +92,11 @@ func main() {
 	breakerThreshold := flag.Int("breaker-threshold", 5, "Circuit Breaker failure threshold (0 to disable)")
 	breakerTimeout := flag.Duration("breaker-timeout", 30*time.Second, "Circuit Breaker reset timeout")
 
+	// File transfer flags
+	copyFile := flag.String("copy", "", "Copy local file to remote (format: local=>remote, e.g. /tmp/file.txt=>C:\\Temp\\file.txt)")
+	fetchFile := flag.String("fetch", "", "Fetch remote file to local (format: remote=>local, e.g. C:\\Temp\\file.txt=>/tmp/file.txt)")
+	verifyChecksum := flag.Bool("verify", false, "Verify file transfer with SHA256 checksum")
+
 	autoReconnect := flag.Bool("auto-reconnect", false, "Enable automatic reconnection on failures")
 
 	flag.Parse()
@@ -526,6 +531,50 @@ func main() {
 		fmt.Println("\nDisconnected! Command continues running on server.")
 		fmt.Println("To recover output later, run:")
 		fmt.Printf("  ./psrp-client ... -reconnect %s -recover %s -poolid %q\n", shellID, commandID, poolIDVal)
+		return
+	}
+
+	// Handle file copy (upload)
+	if *copyFile != "" {
+		parts := strings.SplitN(*copyFile, "=>", 2)
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			fmt.Fprintln(os.Stderr, "Error: -copy format is 'local=>remote' (e.g. /tmp/file.txt=>C:\\Temp\\file.txt)")
+			os.Exit(1)
+		}
+		localPath, remotePath := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+
+		fmt.Printf("Copying %s -> %s...\n", localPath, remotePath)
+		var opts []client.FileTransferOption
+		if *verifyChecksum {
+			opts = append(opts, client.WithChecksumVerification(true))
+		}
+		if err := psrp.CopyFile(ctx, localPath, remotePath, opts...); err != nil {
+			fmt.Fprintf(os.Stderr, "Error copying file: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("File copied successfully!")
+		return
+	}
+
+	// Handle file fetch (download)
+	if *fetchFile != "" {
+		parts := strings.SplitN(*fetchFile, "=>", 2)
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			fmt.Fprintln(os.Stderr, "Error: -fetch format is 'remote=>local' (e.g. C:\\Temp\\file.txt=>/tmp/file.txt)")
+			os.Exit(1)
+		}
+		remotePath, localPath := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+
+		fmt.Printf("Fetching %s -> %s...\n", remotePath, localPath)
+		var opts []client.FileTransferOption
+		if *verifyChecksum {
+			opts = append(opts, client.WithChecksumVerification(true))
+		}
+		if err := psrp.FetchFile(ctx, remotePath, localPath, opts...); err != nil {
+			fmt.Fprintf(os.Stderr, "Error fetching file: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("File fetched successfully!")
 		return
 	}
 
