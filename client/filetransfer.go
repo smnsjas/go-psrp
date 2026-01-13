@@ -4,10 +4,24 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+)
+
+// Buffer pool for chunk allocation (zero-copy optimization)
+var bufferPool = sync.Pool{
+	New: func() interface{} {
+		b := make([]byte, 256*1024) // 256KB default
+		return &b
+	},
+}
+
+const (
+	// maxChunkBase64Size limits Base64 encoded chunk size (defense in depth)
+	maxChunkBase64Size = 2 * 1024 * 1024 // 2MB Base64 (~1.5MB raw)
 )
 
 // FileTransferOptions configures file transfer behavior.
@@ -17,7 +31,7 @@ type FileTransferOptions struct {
 	ChunkSize int
 
 	// MaxConcurrency limits the number of parallel chunk uploads/downloads.
-	// Default: 4 goroutines.
+	// Default: 4 goroutines (Phase 2).
 	MaxConcurrency int
 
 	// UseCompression enables gzip compression for file chunks.
@@ -35,6 +49,39 @@ type FileTransferOptions struct {
 	// Timeout overrides the automatic timeout calculation.
 	// If zero, timeout is calculated based on file size.
 	Timeout int
+}
+
+// FileTransferOption is a functional option for configuring file transfers.
+type FileTransferOption func(*FileTransferOptions)
+
+// WithChunkSize sets the chunk size for file transfer.
+func WithChunkSize(size int) FileTransferOption {
+	return func(o *FileTransferOptions) { o.ChunkSize = size }
+}
+
+// WithMaxConcurrency sets the maximum number of concurrent chunk transfers.
+func WithMaxConcurrency(n int) FileTransferOption {
+	return func(o *FileTransferOptions) { o.MaxConcurrency = n }
+}
+
+// WithCompression enables or disables compression.
+func WithCompression(enabled bool) FileTransferOption {
+	return func(o *FileTransferOptions) { o.UseCompression = enabled }
+}
+
+// WithProgressCallback sets a progress callback function.
+func WithProgressCallback(cb func(int64, int64)) FileTransferOption {
+	return func(o *FileTransferOptions) { o.ProgressCallback = cb }
+}
+
+// WithChecksumVerification enables or disables checksum verification.
+func WithChecksumVerification(enabled bool) FileTransferOption {
+	return func(o *FileTransferOptions) { o.VerifyChecksum = enabled }
+}
+
+// WithTimeout sets a custom timeout.
+func WithTimeout(seconds int) FileTransferOption {
+	return func(o *FileTransferOptions) { o.Timeout = seconds }
 }
 
 // DefaultFileTransferOptions returns sensible defaults.
@@ -108,23 +155,13 @@ func sanitizeForPowerShell(s string) string {
 }
 
 // CopyFile uploads a local file to the remote host.
-// This is a placeholder for Step 1.2 implementation.
-func (c *Client) CopyFile(ctx context.Context, localPath, remotePath string, opts ...FileTransferOptions) error {
-	// Apply defaults
+// Files are transferred in chunks using Base64 encoding over PowerShell remoting.
+// For large files, consider enabling compression or adjusting the chunk size.
+func (c *Client) CopyFile(ctx context.Context, localPath, remotePath string, opts ...FileTransferOption) error {
+	// Apply defaults and options
 	opt := DefaultFileTransferOptions()
-	if len(opts) > 0 {
-		if opts[0].ChunkSize > 0 {
-			opt.ChunkSize = opts[0].ChunkSize
-		}
-		if opts[0].MaxConcurrency > 0 {
-			opt.MaxConcurrency = opts[0].MaxConcurrency
-		}
-		opt.UseCompression = opts[0].UseCompression
-		opt.ProgressCallback = opts[0].ProgressCallback
-		opt.VerifyChecksum = opts[0].VerifyChecksum
-		if opts[0].Timeout > 0 {
-			opt.Timeout = opts[0].Timeout
-		}
+	for _, fn := range opts {
+		fn(&opt)
 	}
 
 	// Validate paths
@@ -182,18 +219,37 @@ func (c *Client) CopyFile(ctx context.Context, localPath, remotePath string, opt
 	// Step 2: Upload chunks sequentially (serial mode for Phase 1)
 	c.logInfo("CopyFile: Uploading %d chunks (%d bytes)", numChunks, totalSize)
 
-	buf := make([]byte, opt.ChunkSize)
+	// Get buffer from pool
+	bufPtr := bufferPool.Get().(*[]byte)
+	defer bufferPool.Put(bufPtr)
+	buf := (*bufPtr)[:opt.ChunkSize]
+
 	for i := int64(0); i < numChunks; i++ {
+		// Check for context cancellation
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("transfer cancelled: %w", ctx.Err())
+		default:
+		}
+
 		// Read chunk
 		n, readErr := file.Read(buf)
-		if readErr != nil && n == 0 {
+		if readErr != nil && readErr != io.EOF {
 			return fmt.Errorf("failed to read chunk %d: %w", i, readErr)
+		}
+		if n == 0 {
+			break // End of file
 		}
 
 		chunk := buf[:n]
 
 		// Encode to Base64
 		b64 := base64.StdEncoding.EncodeToString(chunk)
+
+		// Validate Base64 size (defense in depth)
+		if len(b64) > maxChunkBase64Size {
+			return fmt.Errorf("chunk %d too large after encoding: %d bytes", i, len(b64))
+		}
 
 		// Append chunk to remote file
 		appendScript := fmt.Sprintf(`
@@ -219,7 +275,7 @@ func (c *Client) CopyFile(ctx context.Context, localPath, remotePath string, opt
 			progress.update(int64(n))
 		}
 
-		// Log progress every 10 chunks
+		// Log progress every 10 chunks (only if logging is enabled)
 		if (i+1)%10 == 0 || i == numChunks-1 {
 			c.logInfo("CopyFile: Uploaded chunk %d/%d", i+1, numChunks)
 		}
@@ -231,22 +287,11 @@ func (c *Client) CopyFile(ctx context.Context, localPath, remotePath string, opt
 
 // FetchFile downloads a remote file to the local host.
 // This is a placeholder for Step 1.3 implementation.
-func (c *Client) FetchFile(ctx context.Context, remotePath, localPath string, opts ...FileTransferOptions) error {
-	// Apply defaults
+func (c *Client) FetchFile(ctx context.Context, remotePath, localPath string, opts ...FileTransferOption) error {
+	// Apply defaults and options
 	opt := DefaultFileTransferOptions()
-	if len(opts) > 0 {
-		if opts[0].ChunkSize > 0 {
-			opt.ChunkSize = opts[0].ChunkSize
-		}
-		if opts[0].MaxConcurrency > 0 {
-			opt.MaxConcurrency = opts[0].MaxConcurrency
-		}
-		opt.UseCompression = opts[0].UseCompression
-		opt.ProgressCallback = opts[0].ProgressCallback
-		opt.VerifyChecksum = opts[0].VerifyChecksum
-		if opts[0].Timeout > 0 {
-			opt.Timeout = opts[0].Timeout
-		}
+	for _, fn := range opts {
+		fn(&opt)
 	}
 
 	// Validate paths
