@@ -1344,6 +1344,26 @@ func (c *Client) Health() HealthStatus {
 	}
 }
 
+// RunspaceUtilization returns the current runspace pool utilization statistics.
+// Returns (available, total) where:
+//   - available: runspaces ready for new pipelines
+//   - total: maximum runspaces configured for this pool
+//
+// For HvSocket backends, availability is tracked via RUNSPACE_AVAILABILITY messages.
+// For WSMan backends, availability tracking is not supported (always returns 0, total).
+func (c *Client) RunspaceUtilization() (available, total int) {
+	c.mu.Lock()
+	pool := c.psrpPool
+	c.mu.Unlock()
+
+	if pool == nil {
+		return 0, 0
+	}
+
+	available, total = pool.RunspaceUtilization()
+	return available, total
+}
+
 // startKeepaliveLocked starts the keepalive goroutine (caller must hold c.mu).
 func (c *Client) startKeepaliveLocked() {
 	interval := c.config.KeepAliveInterval
@@ -1686,6 +1706,22 @@ func (c *Client) startPipeline(ctx context.Context, script string) (*pipeline.Pi
 	backend := c.backend
 	callID := c.callID
 	c.mu.Unlock()
+
+	// Wait for available runspace before creating pipeline
+	// Only enforced for HvSocket (dispatch loop tracks availability via RUNSPACE_AVAILABILITY messages)
+	// WSMan doesn't track availability this way (per-pipeline transports)
+	if backend != nil && backend.SupportsPSRPKeepalive() {
+		waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+
+		if err := psrpPool.WaitForAvailability(waitCtx, 1); err != nil {
+			c.logWarn("Runspace availability wait failed: %v (continuing anyway)", err)
+			// Non-blocking failure - server might still accept pipeline
+		} else {
+			available, total := psrpPool.RunspaceUtilization()
+			c.logf("Runspace pool: %d available / %d total", available, total)
+		}
+	}
 
 	// Create pipeline
 	psrpPipeline, err := psrpPool.CreatePipeline(script)
