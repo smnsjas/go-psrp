@@ -17,20 +17,22 @@ type EventSubscription struct {
 	// Errors receives any errors encountered during polling.
 	Errors <-chan error
 
-	logger      *slog.Logger
-	client      *wsman.Client
-	sub         *wsman.Subscription
-	resourceURI string
-	events      chan []byte
-	errors      chan error
-	cancel      context.CancelFunc
-	ctx         context.Context
+	logger       *slog.Logger
+	client       *wsman.Client
+	sub          *wsman.Subscription
+	resourceURI  string
+	events       chan []byte
+	errors       chan error
+	cancel       context.CancelFunc
+	ctx          context.Context
+	pollInterval time.Duration
 }
 
 // SubscribeOptions contains options for the Subscribe operation.
 type SubscribeOptions struct {
-	ResourceURI string        // Defaults to "http://schemas.microsoft.com/wbem/wsman/1/wmi/root/cimv2/*"
-	Expires     time.Duration // Defaults to 10 minutes
+	ResourceURI  string        // Defaults to "http://schemas.microsoft.com/wbem/wsman/1/wmi/root/cimv2/*"
+	Expires      time.Duration // Defaults to 10 minutes
+	PollInterval time.Duration // Defaults to 2 seconds
 }
 
 // Subscribe subscribes to specific events using a WQL query.
@@ -39,8 +41,9 @@ type SubscribeOptions struct {
 func (c *Client) Subscribe(ctx context.Context, query string, opts ...SubscribeOptions) (*EventSubscription, error) {
 	// Default options
 	opt := SubscribeOptions{
-		ResourceURI: "http://schemas.microsoft.com/wbem/wsman/1/wmi/root/cimv2/*",
-		Expires:     10 * time.Minute,
+		ResourceURI:  "http://schemas.microsoft.com/wbem/wsman/1/wmi/root/cimv2/*",
+		Expires:      10 * time.Minute,
+		PollInterval: 2 * time.Second,
 	}
 	if len(opts) > 0 {
 		if opts[0].ResourceURI != "" {
@@ -48,6 +51,9 @@ func (c *Client) Subscribe(ctx context.Context, query string, opts ...SubscribeO
 		}
 		if opts[0].Expires > 0 {
 			opt.Expires = opts[0].Expires
+		}
+		if opts[0].PollInterval > 0 {
+			opt.PollInterval = opts[0].PollInterval
 		}
 	}
 
@@ -73,14 +79,15 @@ func (c *Client) Subscribe(ctx context.Context, query string, opts ...SubscribeO
 	// 2. Setup subscription object
 	ctx, cancel := context.WithCancel(context.Background()) // internal context for polling loop
 	es := &EventSubscription{
-		logger:      c.slogLogger, // Inherit logger from client
-		client:      c.wsman,
-		sub:         sub,
-		resourceURI: opt.ResourceURI,
-		events:      make(chan []byte, 100), // Buffer events
-		errors:      make(chan error, 10),
-		cancel:      cancel,
-		ctx:         ctx,
+		logger:       c.slogLogger, // Inherit logger from client
+		client:       c.wsman,
+		sub:          sub,
+		resourceURI:  opt.ResourceURI,
+		events:       make(chan []byte, 100), // Buffer events
+		errors:       make(chan error, 10),
+		cancel:       cancel,
+		ctx:          ctx,
+		pollInterval: opt.PollInterval,
 	}
 
 	c.logInfo("Subscribed to events: query='%s', sub_id='%s'", query, sub.SubscriptionID)
@@ -100,7 +107,7 @@ func (es *EventSubscription) pollLoop() {
 	defer close(es.events)
 	defer close(es.errors)
 
-	ticker := time.NewTicker(2 * time.Second) // Poll every 2s
+	ticker := time.NewTicker(es.pollInterval)
 	defer ticker.Stop()
 
 	enumContext := es.sub.EnumerationContext

@@ -28,7 +28,10 @@ func NewClient(endpoint string, tr *transport.HTTPTransport) *Client {
 	}
 }
 
-// SetSessionID sets the WS-Management SessionId for the client.
+// SetTransport sets the HTTP transport (useful for testing/mocking).
+func (c *Client) SetTransport(tr *transport.HTTPTransport) {
+	c.transport = tr
+}
 func (c *Client) SetSessionID(sessionID string) {
 	c.sessionID = sessionID
 }
