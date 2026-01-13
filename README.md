@@ -139,7 +139,9 @@ For long-running commands, process output in real-time:
 
 ```go
 // Returns channels immediately
+<!-- markdownlint-disable MD013 -->
 stream, err := c.ExecuteStream(ctx, "1..10 | ForEach-Object { $_; Start-Sleep 1 }")
+<!-- markdownlint-enable MD013 -->
 if err != nil {
     log.Fatal(err)
 }
@@ -153,7 +155,7 @@ for output := range stream.Output {
 
 ### Resilience & Reconnection
 
-**Manual Reconnection (WSMan only)**
+#### Manual Reconnection (WSMan only)
 
 Disconnect from a session and reconnect later:
 
@@ -167,7 +169,7 @@ c2, _ := client.New(target, cfg)
 err := c2.Reconnect(ctx, shellID)
 ```
 
-**Automatic Reconnection**
+#### Automatic Reconnection
 
 Enable automatic reconnection for transient failures (network issues, VM
 pause/resume, etc.):
@@ -198,7 +200,7 @@ This is especially useful for:
 - **Unstable networks** with intermittent connectivity
 - **Long-running scripts** that need to survive connection hiccups
 
-**Command Retry (Transient Errors)**
+#### Command Retry (Transient Errors)
 
 Configure retry logic for transient command-level errors (network blips,
 timeouts):
@@ -214,7 +216,7 @@ cfg.Retry.MaxDelay = 5 * time.Second
 result, err := c.Execute(ctx, "Get-Process")
 ```
 
-**Circuit Breaker (Fail Fast)**
+#### Circuit Breaker (Fail Fast)
 
 Prevent resource exhaustion when the server is down by failing fast:
 
@@ -395,7 +397,9 @@ go build ./cmd/psrp-client
 | `client` | High-level API: `New()`, `Connect()`, `Execute()`, `Close()` |
 | `powershell` | PSRP bridge, `WSManBackend`, `HvSocketBackend` |
 | `wsman` | WSMan client, SOAP envelope builder, operations |
+<!-- markdownlint-disable MD013 -->
 | `wsman/auth` | Authentication: `BasicAuth`, `NTLMAuth`, `NegotiateAuth`, `PureKerberosProvider` |
+<!-- markdownlint-enable MD013 -->
 | `wsman/transport` | HTTP/TLS transport layer |
 | `hvsock` | Hyper-V Socket connectivity (Windows only) |
 
