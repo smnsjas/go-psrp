@@ -12,7 +12,7 @@ This library builds on [go-psrpcore](https://github.com/smnsjas/go-psrpcore) by
 adding transport layers, making it ready for production PowerShell remoting.
 
 <!-- markdownlint-disable MD013 -->
-```
+```text
 ┌─────────────────────────────────────────────────────────┐
 │                    Your Application                     │
 └─────────────────────────────────────────────────────────┘
@@ -352,7 +352,7 @@ go build ./cmd/psrp-client
 ### CLI Flags
 
 | Flag | Description | Default |
-|------|-------------|---------|
+| ---- | ----------- | ------- |
 | `-server` | WinRM server hostname | (required for WSMan) |
 | `-user` | Username | (required) |
 | `-pass` | Password (or use `PSRP_PASSWORD` env) | - |
@@ -385,7 +385,7 @@ go build ./cmd/psrp-client
 ## Package Structure
 
 | Package | Description |
-|---------|-------------|
+| ------- | ----------- |
 | `client` | High-level API: `New()`, `Connect()`, `Execute()`, `Close()` |
 | `powershell` | PSRP bridge, `WSManBackend`, `HvSocketBackend` |
 | `wsman` | WSMan client, SOAP envelope builder, operations |
