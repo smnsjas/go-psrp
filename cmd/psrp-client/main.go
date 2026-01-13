@@ -80,6 +80,15 @@ func main() {
 	enableCBT := flag.Bool("cbt", false, "Enable Channel Binding Tokens (CBT) for NTLM (Extended Protection)")
 	testConcurrency := flag.Int("test-concurrency", 0, "Test semaphore: spawn N concurrent commands (requires -script)")
 	maxRunspaces := flag.Int("max-runspaces", 1, "Max concurrent pipelines (default: 1)")
+	// Retry flags
+	retryAttempts := flag.Int("retry-attempts", 0, "Max command retry attempts (default: 0 = disabled)")
+	retryDelay := flag.Duration("retry-delay", 100*time.Millisecond, "Initial retry delay")
+	retryMaxDelay := flag.Duration("retry-max-delay", 5*time.Second, "Max retry delay")
+
+	// Circuit Breaker flags
+	breakerThreshold := flag.Int("breaker-threshold", 5, "Circuit Breaker failure threshold (0 to disable)")
+	breakerTimeout := flag.Duration("breaker-timeout", 30*time.Second, "Circuit Breaker reset timeout")
+
 	autoReconnect := flag.Bool("auto-reconnect", false, "Enable automatic reconnection on failures")
 
 	flag.Parse()
@@ -88,7 +97,7 @@ func main() {
 		_ = os.Setenv("PSRP_DEBUG", "1") // Enable legacy debug as well
 	}
 
-	fmt.Println("PSRP Client - Codebase Fix v4 (Structured Logging)")
+	fmt.Println("PSRP Client - Codebase Fix v5 (Retry Logic)")
 
 	// Validate required flags
 	// If restoring session, we don't need server or vmid flags as they come from the state file
@@ -205,12 +214,49 @@ func main() {
 	cfg.UseTLS = *useTLS
 	cfg.InsecureSkipVerify = *insecure
 	cfg.Timeout = *timeout
-	cfg.Timeout = *timeout
 	cfg.KeepAliveInterval = *keepAlive
 	cfg.IdleTimeout = *idleTimeout
 	cfg.EnableCBT = *enableCBT
 	cfg.MaxRunspaces = *maxRunspaces
 	cfg.Reconnect.Enabled = *autoReconnect
+
+	// Configure Retry Policy
+	if *retryAttempts > 0 {
+		cfg.Retry = client.DefaultRetryPolicy()
+		cfg.Retry.MaxAttempts = *retryAttempts
+		if *retryDelay > 0 {
+			cfg.Retry.InitialDelay = *retryDelay
+		}
+		if *retryMaxDelay > 0 {
+			cfg.Retry.MaxDelay = *retryMaxDelay
+		}
+		fmt.Printf("Command Retry: Enabled (attempts=%d, delay=%v, max=%v)\n",
+			cfg.Retry.MaxAttempts, cfg.Retry.InitialDelay, cfg.Retry.MaxDelay)
+	}
+
+	// Configure Circuit Breaker
+	if *breakerThreshold > 0 {
+		cfg.CircuitBreaker = client.DefaultCircuitBreakerPolicy()
+		cfg.CircuitBreaker.FailureThreshold = *breakerThreshold
+		cfg.CircuitBreaker.ResetTimeout = *breakerTimeout
+		fmt.Printf("Circuit Breaker: Enabled (threshold=%d, timeout=%v)\n",
+			cfg.CircuitBreaker.FailureThreshold, cfg.CircuitBreaker.ResetTimeout)
+	} else {
+		cfg.CircuitBreaker = &client.CircuitBreakerPolicy{Enabled: false}
+		fmt.Println("Circuit Breaker: Disabled")
+	}
+
+	// Configure Circuit Breaker
+	if *breakerThreshold > 0 {
+		cfg.CircuitBreaker = client.DefaultCircuitBreakerPolicy()
+		cfg.CircuitBreaker.FailureThreshold = *breakerThreshold
+		cfg.CircuitBreaker.ResetTimeout = *breakerTimeout
+		fmt.Printf("Circuit Breaker: Enabled (threshold=%d, timeout=%v)\n",
+			cfg.CircuitBreaker.FailureThreshold, cfg.CircuitBreaker.ResetTimeout)
+	} else {
+		cfg.CircuitBreaker = &client.CircuitBreakerPolicy{Enabled: false}
+		fmt.Println("Circuit Breaker: Disabled")
+	}
 
 	// Kerberos settings apply to both AuthNegotiate (default) and explicit -kerberos
 	cfg.Realm = *realm

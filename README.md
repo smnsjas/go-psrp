@@ -18,18 +18,18 @@ This library builds on [go-psrpcore](https://github.com/smnsjas/go-psrpcore) by 
                           ▼
 ┌─────────────────────────────────────────────────────────┐
 │                       go-psrp                           │
-│  ┌─────────────────────────────────────────────────┐   │
-│  │  client/       High-level convenience API       │   │
-│  └─────────────────────────────────────────────────┘   │
-│  ┌─────────────────────────────────────────────────┐   │
-│  │  powershell/   RunspacePool + Pipeline mgmt     │   │
-│  └─────────────────────────────────────────────────┘   │
-│  ┌─────────────────────────────────────────────────┐   │
-│  │  wsman/        WSMan/WinRM transport            │   │
-│  └─────────────────────────────────────────────────┘   │
-│  ┌─────────────────────────────────────────────────┐   │
-│  │  hvsock/       Hyper-V Socket (PowerShell Direct)│   │
-│  └─────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────┐    │
+│  │  client/       High-level convenience API       │    │
+│  └─────────────────────────────────────────────────┘    │
+│  ┌─────────────────────────────────────────────────┐    │
+│  │  powershell/   RunspacePool + Pipeline mgmt     │    │
+│  └─────────────────────────────────────────────────┘    │
+│  ┌─────────────────────────────────────────────────┐    │
+│  │  wsman/        WSMan/WinRM transport            │    │
+│  └─────────────────────────────────────────────────┘    │
+│  ┌─────────────────────────────────────────────────┐    │
+│  │  hvsock/      Hyper-V Socket (PowerShell Direct)│    │
+│  └─────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────┘
                           │
                           ▼
@@ -98,17 +98,6 @@ func main() {
     }
     defer c.Close(ctx)
 
-    // Execute a PowerShell command
-    result, err := c.Execute(ctx, "Get-Process | Select-Object -First 5 Name, Id")
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    for _, obj := range result.Output {
-        fmt.Printf("%+v\n", obj)
-    }
-}
-```go
     // Execute a PowerShell command
     result, err := c.Execute(ctx, "Get-Process | Select-Object -First 5 Name, Id")
     if err != nil {
@@ -201,6 +190,32 @@ This is especially useful for:
 - **Unstable networks** with intermittent connectivity
 - **Long-running scripts** that need to survive connection hiccups
 
+**Command Retry (Transient Errors)**
+
+Configure retry logic for transient command-level errors (network blips, timeouts):
+
+```go
+// Enable command retry
+cfg.Retry = client.DefaultRetryPolicy()
+cfg.Retry.MaxAttempts = 3
+cfg.Retry.InitialDelay = 100 * time.Millisecond
+cfg.Retry.MaxDelay = 5 * time.Second
+
+// IMPORTANT: Only use for idempotent commands!
+result, err := c.Execute(ctx, "Get-Process")
+```
+
+**Circuit Breaker (Fail Fast)**
+
+Prevent resource exhaustion when the server is down by failing fast:
+
+```go
+// Enable circuit breaker
+cfg.CircuitBreaker = client.DefaultCircuitBreakerPolicy()
+cfg.CircuitBreaker.FailureThreshold = 5      // Open after 5 consecutive failures
+cfg.CircuitBreaker.ResetTimeout = 30 * time.Second // Wait 30s before probing
+```
+
 ### PowerShell Direct (HVSocket) - Windows Only
 
 Connect directly to a Hyper-V VM without network configuration:
@@ -284,29 +299,29 @@ cfg.IdleTimeout = "PT1H"
 
 ## Logging
 
- This library enables structured logging (DEBUG, INFO, WARN, ERROR) for both the client logic and the underlying PSRP protocol.
+This library enables structured logging (DEBUG, INFO, WARN, ERROR) for both the client logic and the underlying PSRP protocol.
 
 ### Environment Variables
 
- Global logging can be enabled setting the `PSRP_LOG_LEVEL` environment variable:
+Global logging can be enabled setting the `PSRP_LOG_LEVEL` environment variable:
 
- ```bash
- export PSRP_LOG_LEVEL=info  # options: debug, info, warn, error
- ```
+```bash
+export PSRP_LOG_LEVEL=info  # options: debug, info, warn, error
+```
 
 ### Custom Logger
 
- You can inject your own `slog.Logger` into the client:
+You can inject your own `slog.Logger` into the client:
 
- ```go
- // Create a JSON logger
- logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-     Level: slog.LevelInfo,
- }))
- 
- // Inject it into the client
- client.SetSlogLogger(logger)
- ```
+```go
+// Create a JSON logger
+logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+    Level: slog.LevelInfo,
+}))
+
+// Inject it into the client
+client.SetSlogLogger(logger)
+```
 
 ## CLI Tool
 
