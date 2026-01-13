@@ -8,8 +8,10 @@ Complete PowerShell Remoting Protocol implementation for Go with multiple transp
 
 ## Overview
 
-This library builds on [go-psrpcore](https://github.com/smnsjas/go-psrpcore) by adding transport layers, making it ready for production PowerShell remoting.
+This library builds on [go-psrpcore](https://github.com/smnsjas/go-psrpcore) by
+adding transport layers, making it ready for production PowerShell remoting.
 
+<!-- markdownlint-disable MD013 -->
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                    Your Application                     │
@@ -38,6 +40,7 @@ This library builds on [go-psrpcore](https://github.com/smnsjas/go-psrpcore) by 
 │              (Sans-IO PSRP protocol)                    │
 └─────────────────────────────────────────────────────────┘
 ```
+<!-- markdownlint-enable MD013 -->
 
 ## Features
 
@@ -299,7 +302,8 @@ cfg.IdleTimeout = "PT1H"
 
 ## Logging
 
-This library enables structured logging (DEBUG, INFO, WARN, ERROR) for both the client logic and the underlying PSRP protocol.
+This library enables structured logging (DEBUG, INFO, WARN, ERROR) for both the
+client logic and the underlying PSRP protocol.
 
 ### Environment Variables
 
