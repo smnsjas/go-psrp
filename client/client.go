@@ -118,6 +118,40 @@ func DefaultReconnectPolicy() ReconnectPolicy {
 	}
 }
 
+// RetryPolicy configures command retry behavior for transient failures.
+type RetryPolicy struct {
+	// Enabled activates command retry.
+	Enabled bool
+
+	// MaxAttempts is the maximum number of attempts including the first one.
+	// Example: MaxAttempts=3 means 1 original execution + 2 retries.
+	// Default: 3.
+	MaxAttempts int
+
+	// InitialDelay is the delay before the first retry.
+	// Default: 100ms.
+	InitialDelay time.Duration
+
+	// MaxDelay is the maximum delay between retries (exponential cap).
+	// Default: 5s.
+	MaxDelay time.Duration
+
+	// Multiplier is the backoff multiplier.
+	// Default: 2.0.
+	Multiplier float64
+}
+
+// DefaultRetryPolicy returns a conservative default retry policy.
+func DefaultRetryPolicy() *RetryPolicy {
+	return &RetryPolicy{
+		Enabled:      true,
+		MaxAttempts:  3,
+		InitialDelay: 100 * time.Millisecond,
+		MaxDelay:     5 * time.Second,
+		Multiplier:   2.0,
+	}
+}
+
 // Config holds configuration for a PSRP client.
 type Config struct {
 	// Port is the WinRM port (default: 5985 for HTTP, 5986 for HTTPS).
@@ -198,8 +232,45 @@ type Config struct {
 
 	// Reconnect configures automatic reconnection behavior.
 	// If Reconnect.Enabled is true, the client will attempt to reconnect
-	// automatically when transient connection failures occur.
+	// when the pool is broken (e.g., connection lost).
+	// This handles pool-level recovery.
 	Reconnect ReconnectPolicy
+
+	// Retry configures command-level retry behavior for transient failures.
+	// If nil, retry is disabled (default).
+	// This handles transient network/transport errors during command execution.
+	//
+	// IMPORTANT: Retry assumes idempotent commands. Non-idempotent commands
+	// Retry assumes idempotent commands. Non-idempotent commands
+	// with side effects may execute multiple times if retried.
+	Retry *RetryPolicy
+
+	// CircuitBreaker configures the circuit breaker to fail fast when server is down.
+	// This prevents resource exhaustion by stopping requests after a threshold of failures.
+	CircuitBreaker *CircuitBreakerPolicy
+}
+
+// CircuitBreakerPolicy configures the failure threshold and recovery timeout.
+type CircuitBreakerPolicy struct {
+	// Enabled activates the circuit breaker.
+	Enabled bool
+
+	// FailureThreshold is the number of consecutive failures before opening the breaker.
+	// Default: 5.
+	FailureThreshold int
+
+	// ResetTimeout is the duration to wait before testing the connection (Half-Open).
+	// Default: 30s.
+	ResetTimeout time.Duration
+}
+
+// DefaultCircuitBreakerPolicy returns sensible defaults.
+func DefaultCircuitBreakerPolicy() *CircuitBreakerPolicy {
+	return &CircuitBreakerPolicy{
+		Enabled:          true,
+		FailureThreshold: 5,
+		ResetTimeout:     30 * time.Second,
+	}
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -293,6 +364,9 @@ type Client struct {
 
 	// Automatic reconnection
 	reconnectMgr *reconnectManager
+
+	// Circuit Breaker (Fail Fast)
+	circuitBreaker *CircuitBreaker
 
 	// Security logging (NIST SP 800-92)
 	securityLogger *SecurityLogger
@@ -951,22 +1025,24 @@ func New(hostname string, cfg Config) (*Client, error) {
 			// semaphore initialized in Connect/Reconnect to allow state recovery adjustment if needed?
 			// But Execute checks for it. Better initialize here if possible, or lazy init.
 			// Let's initialize here with safe defaults.
-			semaphore:   newPoolSemaphore(cfg.MaxRunspaces, cfg.MaxQueueSize, cfg.Timeout),
-			outputFiles: make(map[string]string),
-			callID:      newCallIDManager(),
+			semaphore:      newPoolSemaphore(cfg.MaxRunspaces, cfg.MaxQueueSize, cfg.Timeout),
+			outputFiles:    make(map[string]string),
+			callID:         newCallIDManager(),
+			circuitBreaker: NewCircuitBreaker(cfg.CircuitBreaker),
 		}, nil
 
 	default: // WSMan
 		// ... existing WSMan setup ...
 		return &Client{
-			hostname:    hostname,
-			config:      cfg,
-			endpoint:    endpoint,
-			transport:   tr,
-			wsman:       wsman.NewClient(endpoint, tr),
-			semaphore:   newPoolSemaphore(cfg.MaxRunspaces, cfg.MaxQueueSize, cfg.Timeout),
-			outputFiles: make(map[string]string),
-			callID:      newCallIDManager(),
+			hostname:       hostname,
+			config:         cfg,
+			endpoint:       endpoint,
+			transport:      tr,
+			wsman:          wsman.NewClient(endpoint, tr),
+			semaphore:      newPoolSemaphore(cfg.MaxRunspaces, cfg.MaxQueueSize, cfg.Timeout),
+			outputFiles:    make(map[string]string),
+			callID:         newCallIDManager(),
+			circuitBreaker: NewCircuitBreaker(cfg.CircuitBreaker),
 		}, nil
 	}
 }
@@ -978,6 +1054,21 @@ func (c *Client) Endpoint() string {
 
 // Connect establishes a connection to the remote server.
 func (c *Client) Connect(ctx context.Context) error {
+	// Wrap connection logic in Circuit Breaker
+	// If the circuit is open, this will return ErrCircuitOpen immediately.
+	// We use c.circuitBreaker if it exists (it should, initialized in New).
+	// But check for nil just in case (e.g. malformed test setup).
+	if c.circuitBreaker == nil {
+		return c.connectInternal(ctx)
+	}
+
+	return c.circuitBreaker.Execute(func() error {
+		return c.connectInternal(ctx)
+	})
+}
+
+// connectInternal performs the actual connection logic.
+func (c *Client) connectInternal(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -1498,20 +1589,9 @@ type Result struct {
 // Execute runs a PowerShell script on the remote server.
 // The script can be any valid PowerShell code.
 // Returns the output and any errors from execution.
+// Returns the output and any errors from execution.
 func (c *Client) Execute(ctx context.Context, script string) (*Result, error) {
 	c.logInfo("Execute called: '%s'", sanitizeScriptForLogging(script))
-
-	maxAttempts := 1 // Default: no retry
-	if c.config.Reconnect.Enabled && c.config.Reconnect.MaxAttempts > 0 {
-		maxAttempts = c.config.Reconnect.MaxAttempts
-	}
-
-	delay := c.config.Reconnect.InitialDelay
-	if delay == 0 {
-		delay = 1 * time.Second
-	}
-
-	var lastErr error
 
 	// Security Logging (Start)
 	if c.securityLogger != nil {
@@ -1520,110 +1600,176 @@ func (c *Client) Execute(ctx context.Context, script string) (*Result, error) {
 		})
 	}
 
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		result, err := c.executeOnce(ctx, script)
-		if err == nil {
-			// Security Logging (Success)
-			if c.securityLogger != nil {
-				hadErrors := result.HadErrors
-				outcome := OutcomeSuccess
-				severity := SeverityInfo
-				if hadErrors {
-					outcome = OutcomeFailure
-					severity = SeverityWarning
-				}
-				c.securityLogger.LogCommand(SubtypeCommandComplete, outcome, severity, map[string]any{
-					"had_errors": hadErrors,
-					"attempts":   attempt,
-				})
-			}
-			return result, nil // Success
+	// Determine retry configuration
+	var maxAttempts int
+	var retryPolicy *RetryPolicy
+
+	if c.config.Retry != nil && c.config.Retry.Enabled {
+		// New retry logic
+		maxAttempts = c.config.Retry.MaxAttempts
+		retryPolicy = c.config.Retry
+	} else {
+		// Legacy: Use reconnect config for backward compat
+		maxAttempts = 1
+		if c.config.Reconnect.Enabled && c.config.Reconnect.MaxAttempts > 0 {
+			maxAttempts = c.config.Reconnect.MaxAttempts
 		}
+	}
 
-		lastErr = err
+	var result *Result
 
-		// Check if this is a pool broken error (HvSocket disconnect)
-		isPoolBroken := c.isPoolBrokenError(err)
+	// Wrap execution logic in Circuit Breaker
+	operation := func() error {
+		var lastErr error
 
-		// Check if error is transient or pool broken and we should retry
-		if !isTransientError(err) && !isPoolBroken {
-			c.logError("Execute failed (non-recoverable): %v", err)
-			// Security Logging (Failure)
-			if c.securityLogger != nil {
-				c.securityLogger.LogCommand(SubtypeCommandFailed, OutcomeFailure, SeverityError, map[string]any{
-					"error":    err.Error(),
-					"attempts": attempt,
-				})
-			}
-			return nil, err
-		}
-
-		if attempt >= maxAttempts {
-			c.logError("Execute failed (max attempts %d reached): %v", maxAttempts, err)
-			// Security Logging (Failure - Max Attempts)
-			if c.securityLogger != nil {
-				c.securityLogger.LogCommand(SubtypeCommandFailed, OutcomeFailure, SeverityError, map[string]any{
-					"error":        err.Error(),
-					"attempts":     attempt,
-					"max_attempts": maxAttempts,
-				})
-			}
-			return nil, err
-		}
-
-		if isPoolBroken && c.config.Reconnect.Enabled {
-			c.logWarn("Execute attempt %d/%d: pool broken, waiting for reconnection...",
-				attempt, maxAttempts)
-
-			// Security Logging (Reconnection Start)
-			if c.securityLogger != nil {
-				c.securityLogger.LogEvent(EventReconnection, "start", SeverityWarning, OutcomeAttempt, map[string]any{
-					"reason": "pool_broken",
-				})
-			}
-
-			// Wait for the reconnect manager to recover the connection
-			recoveryTimeout := delay * time.Duration(maxAttempts)
-			if recoveryTimeout < 10*time.Second {
-				recoveryTimeout = 10 * time.Second // Minimum 10s for recovery
-			}
-
-			if recovered := c.waitForRecovery(ctx, recoveryTimeout); recovered {
-				c.logInfo("Execute: connection recovered, retrying command")
-
-				// Security Logging (Reconnection Success)
+		for attempt := 1; attempt <= maxAttempts; attempt++ {
+			// Try execute with reconnection handling
+			res, err := c.executeWithReconnectHandling(ctx, script)
+			if err == nil {
+				// Security Logging (Success)
 				if c.securityLogger != nil {
-					c.securityLogger.LogEvent(EventReconnection, "success", SeverityInfo, OutcomeSuccess, nil)
+					hadErrors := res.HadErrors
+					outcome := OutcomeSuccess
+					severity := SeverityInfo
+					if hadErrors {
+						outcome = OutcomeFailure
+						severity = SeverityWarning
+					}
+					c.securityLogger.LogCommand(SubtypeCommandComplete, outcome, severity, map[string]any{
+						"had_errors": hadErrors,
+						"attempts":   attempt,
+					})
 				}
+				result = res
+				return nil // Success
+			}
 
+			lastErr = err
+
+			// Check if error is retryable
+			// Note: executeWithReconnectHandling already handled pool-level ErrBroken
+			if !isRetryableError(err) {
+				c.logError("Execute failed (non-recoverable): %v", err)
+				// Security Logging (Failure)
+				if c.securityLogger != nil {
+					c.securityLogger.LogCommand(SubtypeCommandFailed, OutcomeFailure, SeverityError, map[string]any{
+						"error":    err.Error(),
+						"attempts": attempt,
+					})
+				}
+				return err
+			}
+
+			if attempt >= maxAttempts {
+				c.logError("Execute failed (max attempts %d reached): %v", maxAttempts, err)
+				// Security Logging (Failure - Max Attempts)
+				if c.securityLogger != nil {
+					c.securityLogger.LogCommand(SubtypeCommandFailed, OutcomeFailure, SeverityError, map[string]any{
+						"error":        err.Error(),
+						"attempts":     attempt,
+						"max_attempts": maxAttempts,
+					})
+				}
+				return err
+			}
+
+			// Calculate backoff
+			var delay time.Duration
+			if retryPolicy != nil {
+				delay = calculateRetryBackoff(attempt, retryPolicy)
+			} else {
+				// Legacy fallback logic
 				delay = c.config.Reconnect.InitialDelay
 				if delay == 0 {
 					delay = 1 * time.Second
 				}
-				continue
+				// Exponential backoff for legacy
+				for i := 1; i < attempt; i++ {
+					delay = time.Duration(float64(delay) * 2)
+					if delay > c.config.Reconnect.MaxDelay {
+						delay = c.config.Reconnect.MaxDelay
+						break
+					}
+				}
 			}
-			c.logError("Execute: connection did not recover within timeout")
-			return nil, err
-		}
 
-		c.logWarn("Execute attempt %d/%d failed (transient): %v, retrying in %v",
-			attempt, maxAttempts, err, delay)
+			c.logWarn("Execute attempt %d/%d failed (transient): %v, retrying in %v",
+				attempt, maxAttempts, err, delay)
 
-		// Wait before retry
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(delay):
-		}
+			// Security Logging (Retry)
+			if c.securityLogger != nil {
+				c.securityLogger.LogEvent("command", "retry", SeverityWarning, OutcomeAttempt, map[string]any{
+					"attempt":      attempt,
+					"max_attempts": maxAttempts,
+					"error":        err.Error(),
+					"backoff":      delay.String(),
+				})
+			}
 
-		// Exponential backoff
-		delay = time.Duration(float64(delay) * 2)
-		if delay > c.config.Reconnect.MaxDelay {
-			delay = c.config.Reconnect.MaxDelay
+			// Wait before retry
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(delay):
+			}
 		}
+		return lastErr
 	}
 
-	return nil, lastErr
+	var err error
+	if c.circuitBreaker != nil {
+		err = c.circuitBreaker.Execute(operation)
+	} else {
+		err = operation()
+	}
+
+	return result, err
+}
+
+// executeWithReconnectHandling executes command with automatic reconnection handling.
+//
+// If pool is broken and reconnection is enabled, waits for recovery and retries ONCE.
+// This is separate from the command retry loop above.
+func (c *Client) executeWithReconnectHandling(ctx context.Context, script string) (*Result, error) {
+	// Try execute
+	result, err := c.executeOnce(ctx, script)
+
+	// Check if this is a pool broken error
+	isPoolBroken := c.isPoolBrokenError(err)
+
+	// If pool broken and reconnection enabled, wait for recovery
+	if isPoolBroken && c.config.Reconnect.Enabled {
+		c.logWarn("Execute: pool broken, waiting for reconnection...")
+
+		// Security Logging (Reconnection Start)
+		if c.securityLogger != nil {
+			c.securityLogger.LogEvent(EventReconnection, "start", SeverityWarning, OutcomeAttempt, map[string]any{
+				"reason": "pool_broken",
+			})
+		}
+
+		// Wait for the reconnect manager to recover the connection
+		// Note: In legacy implementation this timeout depended on retry attempts
+		// Here we use a fixed sensible timeout or Reconnect.MaxDelay * attempts equivalent
+		recoveryTimeout := 30 * time.Second // Reasonable default for reconnection
+
+		if recovered := c.waitForRecovery(ctx, recoveryTimeout); recovered {
+			c.logInfo("Execute: connection recovered, retrying command")
+
+			// Security Logging (Reconnection Success)
+			if c.securityLogger != nil {
+				c.securityLogger.LogEvent(EventReconnection, "success", SeverityInfo, OutcomeSuccess, nil)
+			}
+
+			// Retry ONCE after reconnection
+			return c.executeOnce(ctx, script)
+		}
+
+		c.logError("Execute: connection did not recover within timeout")
+		return nil, err
+	}
+
+	return result, err
 }
 
 // executeOnce performs a single command execution attempt including waiting for results.

@@ -59,9 +59,11 @@ func TestClient_Health(t *testing.T) {
 	if got := c.State(); got != runspace.StateOpened {
 		t.Errorf("State() = %v, want %v", got, runspace.StateOpened)
 	}
-	// Default available runspaces is 0
-	if got := c.Health(); got != HealthDegraded {
-		t.Errorf("Health() = %v, want %v", got, HealthDegraded)
+	// Default available runspaces defaults to MaxRunspaces in M3.1 if no message received (Smart Detection)
+	// So it should be Healthy, not Degraded (implied 1 available)
+	if got := c.Health(); got != HealthHealthy {
+		// If it was Degraded, it meant 0 available. Now we assume 1.
+		t.Errorf("Health() = %v, want %v", got, HealthHealthy)
 	}
 
 	// Note: To test 'Healthy', we would need to mock the server sending a RUNSPACE_AVAILABILITY message.
