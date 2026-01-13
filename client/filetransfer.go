@@ -2,13 +2,18 @@ package client
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
+	"hash"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/smnsjas/go-psrpcore/serialization"
 )
 
 // Buffer pool for chunk allocation (zero-copy optimization)
@@ -49,6 +54,10 @@ type FileTransferOptions struct {
 	// Timeout overrides the automatic timeout calculation.
 	// If zero, timeout is calculated based on file size.
 	Timeout int
+
+	// MaxFileSize limits the total file size in bytes to prevent resource exhaustion.
+	// Default: 1GB (can be disabled by setting to -1).
+	MaxFileSize int64
 }
 
 // FileTransferOption is a functional option for configuring file transfers.
@@ -82,6 +91,12 @@ func WithChecksumVerification(enabled bool) FileTransferOption {
 // WithTimeout sets a custom timeout.
 func WithTimeout(seconds int) FileTransferOption {
 	return func(o *FileTransferOptions) { o.Timeout = seconds }
+}
+
+// WithMaxFileSize sets the maximum allowed file size in bytes.
+// Set to -1 to disable the limit (use with caution).
+func WithMaxFileSize(bytes int64) FileTransferOption {
+	return func(o *FileTransferOptions) { o.MaxFileSize = bytes }
 }
 
 // DefaultFileTransferOptions returns sensible defaults.
@@ -154,6 +169,45 @@ func sanitizeForPowerShell(s string) string {
 	return strings.ReplaceAll(s, "'", "''")
 }
 
+// generateInitScript creates the PowerShell script to initialize the destination file.
+// It uses Base64 encoding for the path to prevent command injection.
+func generateInitScript(remotePath string) string {
+	remotePathB64 := base64.StdEncoding.EncodeToString([]byte(remotePath))
+	return fmt.Sprintf(`
+		$ErrorActionPreference = 'Stop'
+		try {
+			$pathBytes = [System.Convert]::FromBase64String('%s')
+			$path = [System.Text.Encoding]::UTF8.GetString($pathBytes)
+			$stream = [IO.File]::Create($path)
+			$stream.Close()
+		} catch {
+			Write-Error "Failed to create file: $_"
+			exit 1
+		}
+	`, remotePathB64)
+}
+
+// generateAppendScript creates the PowerShell script to append a chunk to the destination file.
+// It uses Base64 encoding for the path to prevent command injection.
+func generateAppendScript(remotePath, chunkB64 string) string {
+	remotePathB64 := base64.StdEncoding.EncodeToString([]byte(remotePath))
+	return fmt.Sprintf(`
+		$ErrorActionPreference = 'Stop'
+		try {
+			$pathBytes = [System.Convert]::FromBase64String('%s')
+			$path = [System.Text.Encoding]::UTF8.GetString($pathBytes)
+			
+			$bytes = [Convert]::FromBase64String('%s')
+			$stream = [IO.File]::Open($path, [IO.FileMode]::Append)
+			$stream.Write($bytes, 0, $bytes.Length)
+			$stream.Close()
+		} catch {
+			Write-Error "Failed to write chunk: $_"
+			exit 1
+		}
+	`, remotePathB64, chunkB64)
+}
+
 // CopyFile uploads a local file to the remote host.
 // Files are transferred in chunks using Base64 encoding over PowerShell remoting.
 // For large files, consider enabling compression or adjusting the chunk size.
@@ -181,7 +235,30 @@ func (c *Client) CopyFile(ctx context.Context, localPath, remotePath string, opt
 	if err != nil {
 		return fmt.Errorf("failed to stat file: %w", err)
 	}
+
+	// Security: Validate file type (prevent symlink/device readout)
+	if !stat.Mode().IsRegular() {
+		return fmt.Errorf("source is not a regular file (mode: %s)", stat.Mode())
+	}
+
 	totalSize := stat.Size()
+
+	// Security: Enforce MaxFileSize limit (Resource Exhaustion protection)
+	maxSize := opt.MaxFileSize
+	if maxSize == 0 {
+		maxSize = 1024 * 1024 * 1024 // Default 1GB safety limit
+	}
+
+	// Allow explicitly disabling limit with negative value, but default to safe 1GB
+	if opt.MaxFileSize > 0 {
+		maxSize = opt.MaxFileSize
+	} else if opt.MaxFileSize < 0 {
+		maxSize = 0 // Disabled
+	}
+
+	if maxSize > 0 && totalSize > maxSize {
+		return fmt.Errorf("file too large: %d bytes (max allowed: %d)", totalSize, maxSize)
+	}
 
 	// Initialize progress tracking
 	var progress *transferProgress
@@ -195,25 +272,31 @@ func (c *Client) CopyFile(ctx context.Context, localPath, remotePath string, opt
 	// Calculate number of chunks
 	numChunks := (totalSize + int64(opt.ChunkSize) - 1) / int64(opt.ChunkSize)
 
-	// Sanitize remote path for PowerShell
-	safeRemotePath := sanitizeForPowerShell(remotePath)
+	// Security Event: Log transfer start
+	c.logSecurityEvent("FILE_TRANSFER_START", map[string]interface{}{
+		"operation":   "CopyFile",
+		"source":      localPath,
+		"destination": remotePath,
+		"size_bytes":  totalSize,
+		"chunk_count": numChunks,
+	})
 
 	// Step 1: Initialize remote file (create empty file)
-	initScript := fmt.Sprintf(`
-		$ErrorActionPreference = 'Stop'
-		try {
-			$stream = [IO.File]::Create('%s')
-			$stream.Close()
-		} catch {
-			Write-Error "Failed to create file: $_"
-			exit 1
-		}
-	`, safeRemotePath)
+	initScript := generateInitScript(remotePath)
 
 	c.logInfo("CopyFile: Initializing remote file %s", remotePath)
 	_, err = c.Execute(ctx, initScript)
 	if err != nil {
-		return fmt.Errorf("failed to initialize remote file: %w", err)
+		c.logSecurityEvent("FILE_TRANSFER_FAILED", map[string]interface{}{
+			"operation": "CopyFile",
+			"phase":     "initialize",
+			"error":     err.Error(),
+		})
+		// Sanitize error (Finding 4)
+		if strings.Contains(err.Error(), "Access is denied") {
+			return fmt.Errorf("initialization failed: permission denied")
+		}
+		return fmt.Errorf("initialization failed: remote operation error")
 	}
 
 	// Step 2: Upload chunks sequentially (serial mode for Phase 1)
@@ -223,6 +306,12 @@ func (c *Client) CopyFile(ctx context.Context, localPath, remotePath string, opt
 	bufPtr := bufferPool.Get().(*[]byte)
 	defer bufferPool.Put(bufPtr)
 	buf := (*bufPtr)[:opt.ChunkSize]
+
+	// Initialize Hasher if verification is enabled
+	var hasher hash.Hash
+	if opt.VerifyChecksum {
+		hasher = sha256.New()
+	}
 
 	for i := int64(0); i < numChunks; i++ {
 		// Check for context cancellation
@@ -243,6 +332,11 @@ func (c *Client) CopyFile(ctx context.Context, localPath, remotePath string, opt
 
 		chunk := buf[:n]
 
+		// Update hash if verification is enabled
+		if hasher != nil {
+			hasher.Write(chunk)
+		}
+
 		// Encode to Base64
 		b64 := base64.StdEncoding.EncodeToString(chunk)
 
@@ -252,22 +346,17 @@ func (c *Client) CopyFile(ctx context.Context, localPath, remotePath string, opt
 		}
 
 		// Append chunk to remote file
-		appendScript := fmt.Sprintf(`
-			$ErrorActionPreference = 'Stop'
-			try {
-				$bytes = [Convert]::FromBase64String('%s')
-				$stream = [IO.File]::Open('%s', [IO.FileMode]::Append)
-				$stream.Write($bytes, 0, $bytes.Length)
-				$stream.Close()
-			} catch {
-				Write-Error "Failed to write chunk: $_"
-				exit 1
-			}
-		`, b64, safeRemotePath)
+		appendScript := generateAppendScript(remotePath, b64)
 
 		_, err = c.Execute(ctx, appendScript)
 		if err != nil {
-			return fmt.Errorf("failed to upload chunk %d/%d: %w", i+1, numChunks, err)
+			c.logSecurityEvent("FILE_TRANSFER_FAILED", map[string]interface{}{
+				"operation": "CopyFile",
+				"phase":     "upload_chunk",
+				"chunk":     i,
+				"error":     err.Error(),
+			})
+			return fmt.Errorf("failed to upload chunk %d/%d: remote operation error", i+1, numChunks)
 		}
 
 		// Update progress
@@ -280,6 +369,74 @@ func (c *Client) CopyFile(ctx context.Context, localPath, remotePath string, opt
 			c.logInfo("CopyFile: Uploaded chunk %d/%d", i+1, numChunks)
 		}
 	}
+
+	// Step 3: Verify Checksum (if enabled)
+	if opt.VerifyChecksum {
+		c.logInfo("CopyFile: Verifying checksum...")
+		localHash := hex.EncodeToString(hasher.Sum(nil))
+
+		// Check remote hash using Get-FileHash
+		// Re-encode path for verification script
+		remotePathB64ForVerify := base64.StdEncoding.EncodeToString([]byte(remotePath))
+
+		verifyScript := fmt.Sprintf(`
+			$ErrorActionPreference = 'Stop'
+			try {
+				$pathBytes = [System.Convert]::FromBase64String('%s')
+				$path = [System.Text.Encoding]::UTF8.GetString($pathBytes)
+				(Get-FileHash -Algorithm SHA256 -Path $path).Hash
+			} catch {
+				Write-Error "Failed to verify checksum: $_"
+				exit 1
+			}
+		`, remotePathB64ForVerify)
+
+		result, err := c.Execute(ctx, verifyScript)
+		if err != nil {
+			c.logSecurityEvent("FILE_TRANSFER_FAILED", map[string]interface{}{
+				"operation": "CopyFile",
+				"phase":     "verify_checksum",
+				"error":     err.Error(),
+			})
+			return fmt.Errorf("failed to verify checksum: remote operation error")
+		}
+
+		var output string
+		if result != nil && len(result.Output) > 0 {
+			// output from c.Execute result.Output is []interface{}
+			// Handle various return types from PowerShell serialization
+			if s, ok := result.Output[0].(string); ok {
+				output = s
+			} else if psObj, ok := result.Output[0].(*serialization.PSObject); ok {
+				output = psObj.ToString
+			} else {
+				// Fallback generic string conversion for safety
+				output = fmt.Sprintf("%v", result.Output[0])
+			}
+		}
+
+		remoteHash := strings.TrimSpace(output)
+		if !strings.EqualFold(remoteHash, localHash) {
+			c.logSecurityEvent("FILE_TRANSFER_FAILED", map[string]interface{}{
+				"operation":   "CopyFile",
+				"phase":       "checksum_mismatch",
+				"local_hash":  localHash,
+				"remote_hash": remoteHash,
+			})
+			return fmt.Errorf("checksum mismatch! local: %s, remote: %s", localHash, remoteHash)
+		}
+
+		c.logInfo("CopyFile: Checksum verified (SHA256: %s)", localHash)
+	}
+
+	// Security Event: Log completion
+	c.logSecurityEvent("FILE_TRANSFER_COMPLETE", map[string]interface{}{
+		"operation":   "CopyFile",
+		"destination": remotePath,
+		"bytes_sent":  totalSize,
+		"status":      "success",
+		"verified":    opt.VerifyChecksum,
+	})
 
 	c.logInfo("CopyFile: Transfer complete (%d bytes)", totalSize)
 	return nil
