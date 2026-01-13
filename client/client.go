@@ -991,6 +991,9 @@ func (c *Client) Connect(ctx context.Context) error {
 	// 1. Create Backend
 	// Note: We generate poolID here to pass to backend if needed (HvSocket needs it for Adapter)
 	c.poolID = uuid.New()
+
+	// Ensure logger is initialized early
+	c.ensureLogger()
 	c.logInfoLocked("Initializing new session with PoolID %s", c.poolID)
 
 	// Initialize security logger (NIST SP 800-92)
@@ -1133,6 +1136,19 @@ func (c *Client) Connect(ctx context.Context) error {
 			c.logfLocked("Performing receive on shell EPR...")
 			_, _ = c.wsman.Receive(drainCtx, epr, "")
 			c.logfLocked("Shell receive completed/timed out")
+		}
+	}
+
+	// Wait for at least 1 runspace to be available before declaring "Connected"
+	// This fixes the race condition where Health() immediately after Connect() sees Degraded
+	// NOTE: Only applicable for backends with dispatch loops (HvSocket). WSMan uses per-pipeline
+	// transports and doesn't process RunspaceAvailability messages via dispatch loop.
+	if c.backend.SupportsPSRPKeepalive() {
+		waitCtx, waitCancel := context.WithTimeout(ctx, 2*time.Second)
+		defer waitCancel()
+		if err := c.psrpPool.WaitForAvailability(waitCtx, 1); err != nil {
+			// Log warning but don't fail - server might be slow or pool might be full
+			c.logWarn("WaitForAvailability timed out or failed: %v (proceeding anyway)", err)
 		}
 	}
 
@@ -1301,10 +1317,23 @@ func (c *Client) Health() HealthStatus {
 	state := pool.State()
 	switch state {
 	case runspace.StateOpened:
-		// Check availability
+		// For backends without dispatch loops (WSMan), availability tracking doesn't apply.
+		// If the pool is Opened, it's healthy.
+		// For backends with dispatch loops (HvSocket), check availability.
+		c.mu.Lock()
+		backend := c.backend
+		c.mu.Unlock()
+
+		if backend != nil && !backend.SupportsPSRPKeepalive() {
+			// WSMan: Opened = Healthy (availability not tracked via dispatch loop)
+			return HealthHealthy
+		}
+
+		// HvSocket: Check availability
 		// If AvailableRunspaces > 0, we can accept new commands immediately.
 		// If 0, we are busy (Degraded).
-		if pool.AvailableRunspaces() > 0 {
+		count := pool.AvailableRunspaces()
+		if count > 0 {
 			return HealthHealthy
 		}
 		return HealthDegraded
