@@ -60,7 +60,7 @@ func main() {
 	// HvSocket (PowerShell Direct) flags
 	useHvSocket := flag.Bool("hvsocket", false, "Use Hyper-V Socket (PowerShell Direct) transport")
 	vmID := flag.String("vmid", "", "VM GUID for HvSocket connection")
-	configName := flag.String("configname", "", "PowerShell configuration name (optional, for HvSocket)")
+	configName := flag.String("configname", "", "PowerShell configuration name (e.g. Microsoft.Exchange)")
 	domain := flag.String("domain", ".", "Domain for HvSocket auth (use '.' for local accounts)")
 
 	// Session persistence flags
@@ -292,8 +292,12 @@ func main() {
 	if *useHvSocket {
 		cfg.Transport = client.TransportHvSocket
 		cfg.VMID = *vmID
-		cfg.ConfigurationName = *configName
 		cfg.Domain = *domain
+	}
+
+	// Apply ConfigurationName if provided (applies to both WSMan and HvSocket)
+	if *configName != "" {
+		cfg.ConfigurationName = *configName
 	}
 
 	// Create client
