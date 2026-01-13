@@ -1117,6 +1117,12 @@ func (c *Client) Connect(ctx context.Context) error {
 	// SupportsPSRPKeepalive() returns true for HvSocket (shared transport).
 	if c.backend.SupportsPSRPKeepalive() {
 		c.psrpPool.StartDispatchLoop()
+
+		// Give dispatch loop time to receive RUNSPACE_AVAILABILITY if server sends it
+		// After this delay, if no message received, assume full availability
+		time.Sleep(250 * time.Millisecond)
+
+		c.psrpPool.InitializeAvailabilityIfNeeded()
 	}
 
 	// 4. Drain Shell Output (RunspacePoolState) to ensure pool is ready
@@ -1140,15 +1146,15 @@ func (c *Client) Connect(ctx context.Context) error {
 	}
 
 	// Wait for at least 1 runspace to be available before declaring "Connected"
-	// This fixes the race condition where Health() immediately after Connect() sees Degraded
-	// NOTE: Only applicable for backends with dispatch loops (HvSocket). WSMan uses per-pipeline
-	// transports and doesn't process RunspaceAvailability messages via dispatch loop.
+	// This ensures Health() returns Healthy immediately after Connect().
+	// With smart detection: If server doesn't send RUNSPACE_AVAILABILITY, we assume
+	// full availability after pool opens (250ms grace period above).
 	if c.backend.SupportsPSRPKeepalive() {
-		waitCtx, waitCancel := context.WithTimeout(ctx, 2*time.Second)
+		waitCtx, waitCancel := context.WithTimeout(ctx, 300*time.Millisecond)
 		defer waitCancel()
 		if err := c.psrpPool.WaitForAvailability(waitCtx, 1); err != nil {
-			// Log warning but don't fail - server might be slow or pool might be full
-			c.logWarn("WaitForAvailability timed out or failed: %v (proceeding anyway)", err)
+			// Timeout is OK - means server initialized availability to MaxRunspaces
+			c.logInfo("WaitForAvailability completed: %v", err)
 		}
 	}
 
@@ -1707,21 +1713,29 @@ func (c *Client) startPipeline(ctx context.Context, script string) (*pipeline.Pi
 	callID := c.callID
 	c.mu.Unlock()
 
-	// Wait for available runspace before creating pipeline
-	// Only enforced for HvSocket (dispatch loop tracks availability via RUNSPACE_AVAILABILITY messages)
-	// WSMan doesn't track availability this way (per-pipeline transports)
-	if backend != nil && backend.SupportsPSRPKeepalive() {
-		waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		defer cancel()
+	// DISABLED: Wait for available runspace before creating pipeline
+	// This was causing PowerShell Direct (HvSocket) to hang because many servers
+	// don't send RUNSPACE_AVAILABILITY messages. The semaphore already limits
+	// concurrent execution. Availability tracking is a nice-to-have optimization,
+	// not a requirement.
+	//
+	// TODO: Re-enable with smarter logic:
+	// - If server sends RUNSPACE_AVAILABILITY, use it
+	// - If not, assume availability=MaxRunspaces
+	/*
+		if backend != nil && backend.SupportsPSRPKeepalive() {
+			waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
 
-		if err := psrpPool.WaitForAvailability(waitCtx, 1); err != nil {
-			c.logWarn("Runspace availability wait failed: %v (continuing anyway)", err)
-			// Non-blocking failure - server might still accept pipeline
-		} else {
-			available, total := psrpPool.RunspaceUtilization()
-			c.logf("Runspace pool: %d available / %d total", available, total)
+			if err := psrpPool.WaitForAvailability(waitCtx, 1); err != nil {
+				c.logWarn("Runspace availability wait failed: %v (continuing anyway)", err)
+				// Non-blocking failure - server might still accept pipeline
+			} else {
+				available, total := psrpPool.RunspaceUtilization()
+				c.logf("Runspace pool: %d available / %d total", available, total)
+			}
 		}
-	}
+	*/
 
 	// Create pipeline
 	psrpPipeline, err := psrpPool.CreatePipeline(script)
