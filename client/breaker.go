@@ -47,18 +47,20 @@ type CircuitBreaker struct {
 	threshold int
 	timeout   time.Duration
 	enabled   bool
+	clock     Clock
 }
 
 // NewCircuitBreaker creates a new circuit breaker with the given policy.
 func NewCircuitBreaker(policy *CircuitBreakerPolicy) *CircuitBreaker {
 	if policy == nil {
-		return &CircuitBreaker{enabled: false}
+		return &CircuitBreaker{enabled: false, clock: realClock{}}
 	}
 	return &CircuitBreaker{
 		state:     StateClosed,
 		threshold: policy.FailureThreshold,
 		timeout:   policy.ResetTimeout,
 		enabled:   policy.Enabled,
+		clock:     realClock{},
 	}
 }
 
@@ -86,7 +88,7 @@ func (cb *CircuitBreaker) checkState() error {
 
 	if cb.state == StateOpen {
 		// Check if timeout has expired
-		if time.Since(cb.lastFailure) > cb.timeout {
+		if cb.clock.Now().Sub(cb.lastFailure) > cb.timeout {
 			cb.state = StateHalfOpen
 			return nil
 		}
@@ -129,7 +131,7 @@ func (cb *CircuitBreaker) updateState(err error) {
 	// Actually, if Retry fails, it returns error. That IS a failure.
 
 	cb.failures++
-	cb.lastFailure = time.Now()
+	cb.lastFailure = cb.clock.Now()
 
 	if cb.state == StateHalfOpen {
 		cb.state = StateOpen
