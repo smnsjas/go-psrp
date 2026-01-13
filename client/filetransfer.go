@@ -443,7 +443,8 @@ func (c *Client) CopyFile(ctx context.Context, localPath, remotePath string, opt
 }
 
 // FetchFile downloads a remote file to the local host.
-// This is a placeholder for Step 1.3 implementation.
+// Files are transferred in chunks using Base64 encoding over PowerShell remoting.
+// For large files, consider enabling compression or adjusting the chunk size.
 func (c *Client) FetchFile(ctx context.Context, remotePath, localPath string, opts ...FileTransferOption) error {
 	// Apply defaults and options
 	opt := DefaultFileTransferOptions()
@@ -456,6 +457,268 @@ func (c *Client) FetchFile(ctx context.Context, remotePath, localPath string, op
 		return fmt.Errorf("path validation failed: %w", err)
 	}
 
-	// TODO: Implement in Step 1.3
-	return fmt.Errorf("FetchFile not yet implemented")
+	// Encode remote path for safe embedding in PowerShell
+	remotePathB64 := base64.StdEncoding.EncodeToString([]byte(remotePath))
+
+	// Step 1: Get remote file size
+	sizeScript := fmt.Sprintf(`
+		$ErrorActionPreference = 'Stop'
+		try {
+			$pathBytes = [System.Convert]::FromBase64String('%s')
+			$path = [System.Text.Encoding]::UTF8.GetString($pathBytes)
+			$file = Get-Item -LiteralPath $path -ErrorAction Stop
+			$file.Length
+		} catch {
+			Write-Error "Failed to get file info: $_"
+			exit 1
+		}
+	`, remotePathB64)
+
+	result, err := c.Execute(ctx, sizeScript)
+	if err != nil {
+		c.logSecurityEvent("FILE_TRANSFER_FAILED", map[string]interface{}{
+			"operation": "FetchFile",
+			"phase":     "get_size",
+			"error":     err.Error(),
+		})
+		if strings.Contains(err.Error(), "Cannot find path") {
+			return fmt.Errorf("remote file not found")
+		}
+		return fmt.Errorf("failed to get remote file size: remote operation error")
+	}
+
+	// Parse file size from output
+	var totalSize int64
+	if result != nil && len(result.Output) > 0 {
+		switch v := result.Output[0].(type) {
+		case int64:
+			totalSize = v
+		case int:
+			totalSize = int64(v)
+		case float64:
+			totalSize = int64(v)
+		case string:
+			if _, parseErr := fmt.Sscanf(strings.TrimSpace(v), "%d", &totalSize); parseErr != nil {
+				return fmt.Errorf("failed to parse file size: %w", parseErr)
+			}
+		default:
+			return fmt.Errorf("unexpected file size type: %T", v)
+		}
+	}
+
+	if totalSize == 0 {
+		// Empty file - just create it locally
+		file, createErr := os.Create(localPath)
+		if createErr != nil {
+			return fmt.Errorf("failed to create local file: %w", createErr)
+		}
+		file.Close()
+		c.logInfo("FetchFile: Created empty file %s", localPath)
+		return nil
+	}
+
+	// Security: Enforce MaxFileSize limit
+	maxSize := opt.MaxFileSize
+	if maxSize == 0 {
+		maxSize = 1024 * 1024 * 1024 // Default 1GB
+	}
+	if opt.MaxFileSize > 0 {
+		maxSize = opt.MaxFileSize
+	} else if opt.MaxFileSize < 0 {
+		maxSize = 0 // Disabled
+	}
+
+	if maxSize > 0 && totalSize > maxSize {
+		return fmt.Errorf("remote file too large: %d bytes (max allowed: %d)", totalSize, maxSize)
+	}
+
+	// Calculate number of chunks
+	chunkSize := int64(opt.ChunkSize)
+	numChunks := (totalSize + chunkSize - 1) / chunkSize
+
+	// Security Event: Log transfer start
+	c.logSecurityEvent("FILE_TRANSFER_START", map[string]interface{}{
+		"operation":   "FetchFile",
+		"source":      remotePath,
+		"destination": localPath,
+		"size_bytes":  totalSize,
+		"chunk_count": numChunks,
+	})
+
+	// Create local file
+	file, err := os.Create(localPath)
+	if err != nil {
+		return fmt.Errorf("failed to create local file: %w", err)
+	}
+	defer file.Close()
+
+	// Initialize progress tracking
+	var progress *transferProgress
+	if opt.ProgressCallback != nil {
+		progress = &transferProgress{
+			totalBytes:       totalSize,
+			progressCallback: opt.ProgressCallback,
+		}
+	}
+
+	// Initialize Hasher if verification is enabled
+	var hasher hash.Hash
+	if opt.VerifyChecksum {
+		hasher = sha256.New()
+	}
+
+	c.logInfo("FetchFile: Downloading %d chunks (%d bytes)", numChunks, totalSize)
+
+	// Step 2: Download chunks sequentially
+	for i := int64(0); i < numChunks; i++ {
+		// Check for context cancellation
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("transfer cancelled: %w", ctx.Err())
+		default:
+		}
+
+		offset := i * chunkSize
+		length := chunkSize
+		if offset+length > totalSize {
+			length = totalSize - offset
+		}
+
+		// Read chunk from remote as Base64
+		readScript := fmt.Sprintf(`
+			$ErrorActionPreference = 'Stop'
+			try {
+				$pathBytes = [System.Convert]::FromBase64String('%s')
+				$path = [System.Text.Encoding]::UTF8.GetString($pathBytes)
+				$stream = [IO.File]::OpenRead($path)
+				$stream.Seek(%d, [IO.SeekOrigin]::Begin) | Out-Null
+				$buffer = New-Object byte[] %d
+				$bytesRead = $stream.Read($buffer, 0, %d)
+				$stream.Close()
+				if ($bytesRead -gt 0) {
+					[Convert]::ToBase64String($buffer, 0, $bytesRead)
+				}
+			} catch {
+				Write-Error "Failed to read chunk: $_"
+				exit 1
+			}
+		`, remotePathB64, offset, length, length)
+
+		chunkResult, chunkErr := c.Execute(ctx, readScript)
+		if chunkErr != nil {
+			c.logSecurityEvent("FILE_TRANSFER_FAILED", map[string]interface{}{
+				"operation": "FetchFile",
+				"phase":     "download_chunk",
+				"chunk":     i,
+				"error":     chunkErr.Error(),
+			})
+			return fmt.Errorf("failed to download chunk %d/%d: remote operation error", i+1, numChunks)
+		}
+
+		// Extract Base64 string from output
+		var b64Data string
+		if chunkResult != nil && len(chunkResult.Output) > 0 {
+			if s, ok := chunkResult.Output[0].(string); ok {
+				b64Data = strings.TrimSpace(s)
+			} else if psObj, ok := chunkResult.Output[0].(*serialization.PSObject); ok {
+				b64Data = strings.TrimSpace(psObj.ToString)
+			} else {
+				b64Data = strings.TrimSpace(fmt.Sprintf("%v", chunkResult.Output[0]))
+			}
+		}
+
+		if b64Data == "" {
+			return fmt.Errorf("chunk %d returned empty data", i)
+		}
+
+		// Decode Base64
+		chunkData, decodeErr := base64.StdEncoding.DecodeString(b64Data)
+		if decodeErr != nil {
+			return fmt.Errorf("failed to decode chunk %d: %w", i, decodeErr)
+		}
+
+		// Write to local file
+		if _, writeErr := file.Write(chunkData); writeErr != nil {
+			return fmt.Errorf("failed to write chunk %d: %w", i, writeErr)
+		}
+
+		// Update hash if verification is enabled
+		if hasher != nil {
+			hasher.Write(chunkData)
+		}
+
+		// Update progress
+		if progress != nil {
+			progress.update(int64(len(chunkData)))
+		}
+
+		// Log progress every 10 chunks
+		if (i+1)%10 == 0 || i == numChunks-1 {
+			c.logInfo("FetchFile: Downloaded chunk %d/%d", i+1, numChunks)
+		}
+	}
+
+	// Step 3: Verify Checksum (if enabled)
+	if opt.VerifyChecksum {
+		c.logInfo("FetchFile: Verifying checksum...")
+		localHash := hex.EncodeToString(hasher.Sum(nil))
+
+		// Get remote hash
+		verifyScript := fmt.Sprintf(`
+			$ErrorActionPreference = 'Stop'
+			try {
+				$pathBytes = [System.Convert]::FromBase64String('%s')
+				$path = [System.Text.Encoding]::UTF8.GetString($pathBytes)
+				(Get-FileHash -Algorithm SHA256 -Path $path).Hash
+			} catch {
+				Write-Error "Failed to verify checksum: $_"
+				exit 1
+			}
+		`, remotePathB64)
+
+		verifyResult, verifyErr := c.Execute(ctx, verifyScript)
+		if verifyErr != nil {
+			c.logSecurityEvent("FILE_TRANSFER_FAILED", map[string]interface{}{
+				"operation": "FetchFile",
+				"phase":     "verify_checksum",
+				"error":     verifyErr.Error(),
+			})
+			return fmt.Errorf("failed to verify checksum: remote operation error")
+		}
+
+		var remoteHash string
+		if verifyResult != nil && len(verifyResult.Output) > 0 {
+			if s, ok := verifyResult.Output[0].(string); ok {
+				remoteHash = strings.TrimSpace(s)
+			} else if psObj, ok := verifyResult.Output[0].(*serialization.PSObject); ok {
+				remoteHash = strings.TrimSpace(psObj.ToString)
+			} else {
+				remoteHash = strings.TrimSpace(fmt.Sprintf("%v", verifyResult.Output[0]))
+			}
+		}
+
+		if !strings.EqualFold(remoteHash, localHash) {
+			c.logSecurityEvent("FILE_TRANSFER_FAILED", map[string]interface{}{
+				"operation":   "FetchFile",
+				"phase":       "checksum_mismatch",
+				"local_hash":  localHash,
+				"remote_hash": remoteHash,
+			})
+			return fmt.Errorf("checksum mismatch! local: %s, remote: %s", localHash, remoteHash)
+		}
+
+		c.logInfo("FetchFile: Checksum verified (SHA256: %s)", localHash)
+	}
+
+	// Security Event: Log completion
+	c.logSecurityEvent("FILE_TRANSFER_COMPLETE", map[string]interface{}{
+		"operation":      "FetchFile",
+		"destination":    localPath,
+		"bytes_received": totalSize,
+		"status":         "success",
+		"verified":       opt.VerifyChecksum,
+	})
+
+	c.logInfo("FetchFile: Transfer complete (%d bytes)", totalSize)
+	return nil
 }
