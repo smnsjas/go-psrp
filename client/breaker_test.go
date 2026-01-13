@@ -8,12 +8,16 @@ import (
 )
 
 func TestCircuitBreaker_StateTransitions(t *testing.T) {
+	// Create mock clock
+	mc := newMockClock(time.Now())
+
 	policy := &CircuitBreakerPolicy{
 		Enabled:          true,
 		FailureThreshold: 2,
 		ResetTimeout:     100 * time.Millisecond,
 	}
 	cb := NewCircuitBreaker(policy)
+	cb.clock = mc // Inject mock clock
 
 	// 1. Initial State: Closed
 	if state := cb.State(); state != StateClosed {
@@ -51,8 +55,8 @@ func TestCircuitBreaker_StateTransitions(t *testing.T) {
 		t.Errorf("Execute(Open) error = %v, want ErrCircuitOpen", err)
 	}
 
-	// 6. Wait for Timeout -> Half-Open
-	time.Sleep(150 * time.Millisecond)
+	// 6. Advance time past timeout -> Half-Open
+	mc.Advance(150 * time.Millisecond)
 	// First call transitions to Half-Open and executes
 	ran := false
 	err = cb.Execute(func() error {
@@ -73,12 +77,16 @@ func TestCircuitBreaker_StateTransitions(t *testing.T) {
 }
 
 func TestCircuitBreaker_HalfOpenFailure(t *testing.T) {
+	// Create mock clock
+	mc := newMockClock(time.Now())
+
 	policy := &CircuitBreakerPolicy{
 		Enabled:          true,
 		FailureThreshold: 1,
 		ResetTimeout:     100 * time.Millisecond,
 	}
 	cb := NewCircuitBreaker(policy)
+	cb.clock = mc // Inject mock clock
 
 	// 1. Trip breaker
 	cb.Execute(func() error { return errors.New("fail") })
@@ -86,8 +94,8 @@ func TestCircuitBreaker_HalfOpenFailure(t *testing.T) {
 		t.Fatalf("Failed to open breaker")
 	}
 
-	// 2. Wait
-	time.Sleep(150 * time.Millisecond)
+	// 2. Advance time past timeout
+	mc.Advance(150 * time.Millisecond)
 
 	// 3. Fail in Half-Open
 	ran := false
