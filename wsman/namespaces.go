@@ -27,6 +27,9 @@ const (
 	// NsEnumeration is the WS-Enumeration namespace.
 	NsEnumeration = "http://schemas.xmlsoap.org/ws/2004/09/enumeration"
 
+	// NsEventing is the WS-Eventing namespace.
+	NsEventing = "http://schemas.xmlsoap.org/ws/2004/08/eventing"
+
 	// NsXsi is the XML Schema Instance namespace.
 	NsXsi = "http://www.w3.org/2001/XMLSchema-instance"
 )
@@ -120,4 +123,34 @@ const (
 
 	// ActionConnectResponse is the response to Connect.
 	ActionConnectResponse = "http://schemas.microsoft.com/wbem/wsman/1/windows/shell/ConnectResponse"
+)
+
+// WSMan Action URIs for WS-Eventing.
+const (
+	// ActionSubscribe subscribes to an event source.
+	ActionSubscribe = "http://schemas.xmlsoap.org/ws/2004/08/eventing/Subscribe"
+
+	// ActionSubscribeResponse is the response to Subscribe.
+	ActionSubscribeResponse = "http://schemas.xmlsoap.org/ws/2004/08/eventing/SubscribeResponse"
+
+	// ActionUnsubscribe cancels a subscription.
+	ActionUnsubscribe = "http://schemas.xmlsoap.org/ws/2004/08/eventing/Unsubscribe"
+
+	// ActionUnsubscribeResponse is the response to Unsubscribe.
+	ActionUnsubscribeResponse = "http://schemas.xmlsoap.org/ws/2004/08/eventing/UnsubscribeResponse"
+)
+
+// WSMan Action URIs for WS-Enumeration (Pull).
+const (
+	// ActionPull retrieves queued items (Enumeration/Eventing).
+	ActionPull = "http://schemas.xmlsoap.org/ws/2004/09/enumeration/Pull"
+
+	// ActionPullResponse is the response to Pull.
+	ActionPullResponse = "http://schemas.xmlsoap.org/ws/2004/09/enumeration/PullResponse"
+)
+
+// WSMan Delivery Modes.
+const (
+	// DeliveryModePull indicates pull-based event delivery.
+	DeliveryModePull = "http://schemas.dmtf.org/wbem/wsman/1/wsman/Pull"
 )

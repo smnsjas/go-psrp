@@ -60,7 +60,10 @@ func main() {
 	// HvSocket (PowerShell Direct) flags
 	useHvSocket := flag.Bool("hvsocket", false, "Use Hyper-V Socket (PowerShell Direct) transport")
 	vmID := flag.String("vmid", "", "VM GUID for HvSocket connection")
-	configName := flag.String("configname", "", "PowerShell configuration name (e.g. Microsoft.Exchange)")
+	var configName string
+	flag.StringVar(&configName, "configname", "", "PowerShell configuration name (e.g. Microsoft.Exchange)")
+
+	subscribe := flag.String("subscribe", "", "WQL query to subscribe to (e.g. 'SELECT * FROM Win32_ProcessStartTrace')")
 	domain := flag.String("domain", ".", "Domain for HvSocket auth (use '.' for local accounts)")
 
 	// Session persistence flags
@@ -296,8 +299,8 @@ func main() {
 	}
 
 	// Apply ConfigurationName if provided (applies to both WSMan and HvSocket)
-	if *configName != "" {
-		cfg.ConfigurationName = *configName
+	if configName != "" {
+		cfg.ConfigurationName = configName
 	}
 
 	// Create client
@@ -565,60 +568,93 @@ func main() {
 		return
 	}
 
-	// Execute script (sync)
-	fmt.Printf("Executing: %s\n", *script)
-	fmt.Println("---")
+	// Handle Subscription Mode
+	if *subscribe != "" {
+		fmt.Printf("Subscribing to events with query: %s\n", *subscribe)
 
-	result, err := psrp.Execute(ctx, *script)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error executing script: %v\n", err)
-		os.Exit(1)
+		// Subscribe using the initialized client
+		sub, err := psrp.Subscribe(context.Background(), *subscribe)
+		if err != nil {
+			fmt.Printf("Error subscribing: %v\n", err)
+			os.Exit(1)
+		}
+		defer sub.Close()
+
+		fmt.Println("Subscription active. Waiting for events (Ctrl+C to exit)...")
+
+		for {
+			select {
+			case event, ok := <-sub.Events:
+				if !ok {
+					fmt.Println("Event channel closed.")
+					return
+				}
+				fmt.Printf("--- EVENT RECEIVED ---\n%s\n----------------------\n", string(event))
+			case err, ok := <-sub.Errors:
+				if !ok {
+					return
+				}
+				fmt.Printf("Error: %v\n", err)
+			}
+		}
 	}
 
-	// Print output - format each object for display
-	fmt.Println("Output:")
-	for _, obj := range result.Output {
-		fmt.Println(formatObject(obj))
-	}
+	// Normal Execution Mode
+	if *script != "" {
+		fmt.Printf("Executing: %s\n", *script)
+		fmt.Println("---")
 
-	// Print information stream (Write-Host output)
-	if len(result.Information) > 0 {
-		fmt.Println("Information:")
-		for _, obj := range result.Information {
+		result, err := psrp.Execute(ctx, *script)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error executing script: %v\n", err)
+			os.Exit(1)
+		}
+
+		// Print output - format each object for display
+		fmt.Println("Output:")
+		for _, obj := range result.Output {
 			fmt.Println(formatObject(obj))
 		}
-	}
 
-	// Print warnings
-	if len(result.Warnings) > 0 {
-		fmt.Println("Warnings:")
-		for _, obj := range result.Warnings {
-			fmt.Println(formatObject(obj))
+		// Print information stream (Write-Host output)
+		if len(result.Information) > 0 {
+			fmt.Println("Information:")
+			for _, obj := range result.Information {
+				fmt.Println(formatObject(obj))
+			}
 		}
-	}
 
-	// Print verbose
-	if len(result.Verbose) > 0 {
-		fmt.Println("Verbose:")
-		for _, obj := range result.Verbose {
-			fmt.Println(formatObject(obj))
+		// Print warnings
+		if len(result.Warnings) > 0 {
+			fmt.Println("Warnings:")
+			for _, obj := range result.Warnings {
+				fmt.Println(formatObject(obj))
+			}
 		}
-	}
 
-	// Print debug
-	if len(result.Debug) > 0 {
-		fmt.Println("Debug:")
-		for _, obj := range result.Debug {
-			fmt.Println(formatObject(obj))
+		// Print verbose
+		if len(result.Verbose) > 0 {
+			fmt.Println("Verbose:")
+			for _, obj := range result.Verbose {
+				fmt.Println(formatObject(obj))
+			}
 		}
-	}
 
-	if result.HadErrors {
-		fmt.Fprintln(os.Stderr, "Errors:")
-		for _, obj := range result.Errors {
-			fmt.Fprintln(os.Stderr, formatObject(obj))
+		// Print debug
+		if len(result.Debug) > 0 {
+			fmt.Println("Debug:")
+			for _, obj := range result.Debug {
+				fmt.Println(formatObject(obj))
+			}
 		}
-		os.Exit(1)
+
+		if result.HadErrors {
+			fmt.Fprintln(os.Stderr, "Errors:")
+			for _, obj := range result.Errors {
+				fmt.Fprintln(os.Stderr, formatObject(obj))
+			}
+			os.Exit(1)
+		}
 	}
 
 	// Handle Disconnect
