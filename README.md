@@ -153,6 +153,32 @@ for output := range stream.Output {
 // Note: ExecuteStream handles cleanup automatically when streams are consumed
 ```
 
+### WS-Management Eventing (WMI Events)
+
+Subscribe to WMI events using WS-Eventing:
+
+```go
+// Subscribe to process trace events
+sub, err := c.Subscribe(ctx, "SELECT * FROM Win32_ProcessStartTrace")
+if err != nil {
+    log.Fatal(err)
+}
+defer sub.Close()
+
+// Consume event stream
+for {
+    select {
+    case event, ok := <-sub.Events:
+        if !ok {
+            return
+        }
+        fmt.Printf("Event: %s\n", string(event))
+    case err := <-sub.Errors:
+        log.Printf("Error: %v", err)
+    }
+}
+```
+
 ### Resilience & Reconnection
 
 #### Manual Reconnection (WSMan only)
@@ -381,6 +407,8 @@ go build ./cmd/psrp-client
 | `-loglevel` | Log level (`debug`, `info`, `warn`, `error`) | - |
 | `-keepalive` | PSRP Keepalive interval (e.g., `30s`) | `0` (disabled) |
 | `-idle-timeout` | WSMan Shell idle timeout (ISO8601, e.g. `PT1H`) | `PT30M` |
+| `-reconnect` | Reconnect to existing ShellID | - |
+| `-subscribe` | Subscribe to WMI events (WQL query) | - |
 | `-list-sessions` | List disconnected sessions on server | `false` |
 | `-cleanup` | Cleanup (remove) disconnected sessions | `false` |
 | `-recover` | Recover output from pipeline with CommandID | - |

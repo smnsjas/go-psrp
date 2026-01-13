@@ -705,3 +705,159 @@ func (c *Client) EnumerateCommands(ctx context.Context, shellID string) ([]strin
 
 	return commandIDs, nil
 }
+
+// Subscribe subscribes to an event source.
+func (c *Client) Subscribe(ctx context.Context, resourceURI string, filter string) (*Subscription, error) {
+	env := NewEnvelope().
+		WithAction(ActionSubscribe).
+		WithTo(c.endpoint).
+		WithResourceURI(resourceURI).
+		WithMessageID("uuid:"+strings.ToUpper(uuid.New().String())).
+		WithReplyTo(AddressAnonymous).
+		WithSessionID(c.sessionID).
+		WithMaxEnvelopeSize(153600).
+		WithOperationTimeout("PT60S").
+		WithOption("WSMAN_CMDSHELL_OPTION_KEEPALIVE", "True")
+
+	// Subscribe Body
+	body := Subscribe{
+		Wse: NsEventing,
+		Delivery: Delivery{
+			Mode: DeliveryModePull,
+		},
+		Expires: "PT10M", // Default expiration, maybe make configurable later
+		Filter: Filter{
+			Dialect: "http://schemas.microsoft.com/wbem/wsman/1/WQL",
+			Query:   filter,
+		},
+	}
+
+	bodyBytes, err := xml.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("marshal subscribe body: %w", err)
+	}
+	env.WithBody(bodyBytes)
+
+	respBody, err := c.sendEnvelope(ctx, env)
+	if err != nil {
+		return nil, fmt.Errorf("subscribe: %w", err)
+	}
+
+	var resp struct {
+		XMLName xml.Name `xml:"Envelope"`
+		Body    struct {
+			SubscribeResponse SubscribeResponse `xml:"SubscribeResponse"`
+		} `xml:"Body"`
+	}
+
+	if err := xml.Unmarshal(respBody, &resp); err != nil {
+		return nil, fmt.Errorf("parse subscribe response: %w", err)
+	}
+
+	sub := &Subscription{
+		// Extract SubscriptionID if possible, usually in ReferenceParameters of Manager
+		EnumerationContext: resp.Body.SubscribeResponse.EnumerationContext,
+		Expires:            resp.Body.SubscribeResponse.Expires,
+		Manager:            &resp.Body.SubscribeResponse.SubscriptionManager,
+	}
+
+	// Try to find SubscriptionId in Selectors
+	for _, s := range sub.Manager.Selectors {
+		if strings.EqualFold(s.Name, "SubscriptionId") || strings.EqualFold(s.Name, "Identifier") {
+			sub.SubscriptionID = s.Value
+			break
+		}
+	}
+	// Fallback: Check ReferenceParameters specific field if not in Selectors (some implementations vary)
+
+	return sub, nil
+}
+
+// Unsubscribe cancels a subscription.
+func (c *Client) Unsubscribe(ctx context.Context, sub *Subscription) error {
+	if sub.Manager == nil {
+		return fmt.Errorf("missing subscription manager endpoint")
+	}
+
+	env := NewEnvelope().
+		WithAction(ActionUnsubscribe).
+		WithTo(sub.Manager.Address). // Send to Manager Address
+		WithResourceURI(sub.Manager.ResourceURI).
+		WithMessageID("uuid:" + strings.ToUpper(uuid.New().String())).
+		WithReplyTo(AddressAnonymous).
+		WithSessionID(c.sessionID).
+		WithMaxEnvelopeSize(153600).
+		WithOperationTimeout("PT60S")
+
+	// Add Selectors from Manager
+	for _, s := range sub.Manager.Selectors {
+		env.WithSelector(s.Name, s.Value)
+	}
+
+	// Unsubscribe Body
+	body := Unsubscribe{
+		Wse: NsEventing,
+	}
+	bodyBytes, err := xml.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("marshal unsubscribe body: %w", err)
+	}
+	env.WithBody(bodyBytes)
+
+	_, err = c.sendEnvelope(ctx, env)
+	if err != nil {
+		return fmt.Errorf("unsubscribe: %w", err)
+	}
+
+	return nil
+}
+
+// Pull retrieves items (events) from a subscription or enumeration.
+func (c *Client) Pull(ctx context.Context, resourceURI string, enumContext string, maxElements int) (*PullResponse, error) {
+	// If maxElements is 0, default to something reasonable
+	if maxElements <= 0 {
+		maxElements = 100
+	}
+
+	env := NewEnvelope().
+		WithAction(ActionPull).
+		WithTo(c.endpoint).
+		WithResourceURI(resourceURI).
+		WithMessageID("uuid:" + strings.ToUpper(uuid.New().String())).
+		WithReplyTo(AddressAnonymous).
+		WithSessionID(c.sessionID).
+		WithMaxEnvelopeSize(153600).
+		WithOperationTimeout("PT20S")
+
+	// Pull Body
+	body := Pull{
+		Wsen:               NsEnumeration,
+		EnumerationContext: enumContext,
+		MaxElements:        maxElements,
+		MaxTime:            "PT5S",
+	}
+
+	bodyBytes, err := xml.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("marshal pull body: %w", err)
+	}
+	env.WithBody(bodyBytes)
+
+	respBody, err := c.sendEnvelope(ctx, env)
+	if err != nil {
+		return nil, fmt.Errorf("pull: %w", err)
+	}
+
+	var resp struct {
+		XMLName xml.Name `xml:"Envelope"`
+		Body    struct {
+			PullResponse PullResponse `xml:"PullResponse"`
+		} `xml:"Body"`
+	}
+
+	if err := xml.Unmarshal(respBody, &resp); err != nil {
+		return nil, fmt.Errorf("parse pull response: %w", err)
+	}
+
+	return &resp.Body.PullResponse, nil
+}
