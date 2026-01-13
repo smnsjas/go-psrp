@@ -49,10 +49,24 @@ type ReceiveResult struct {
 // For PowerShell remoting, creationXml should contain base64-encoded PSRP fragments
 // (SessionCapability + InitRunspacePool messages).
 func (c *Client) Create(ctx context.Context, options map[string]string, creationXML string) (*EndpointReference, error) {
+	// Check for ResourceURI override in options
+	resourceURI := ResourceURIPowerShell
+	if v, ok := options["ResourceURI"]; ok {
+		resourceURI = v
+		// Create a copy of options without ResourceURI to prevent it from being sent as a shell option
+		newOptions := make(map[string]string, len(options)-1)
+		for k, val := range options {
+			if k != "ResourceURI" {
+				newOptions[k] = val
+			}
+		}
+		options = newOptions
+	}
+
 	env := NewEnvelope().
 		WithAction(ActionCreate).
 		WithTo(c.endpoint).
-		WithResourceURI(ResourceURIPowerShell).
+		WithResourceURI(resourceURI).
 		WithMaxEnvelopeSize(153600).
 		WithOperationTimeout("PT60S").
 		WithMessageID("uuid:" + strings.ToUpper(uuid.New().String())).

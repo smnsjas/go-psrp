@@ -48,14 +48,24 @@ type WSManBackend struct {
 	transport *WSManTransport // Reference to the transport for configuration
 	// idleTimeout is the WSMan shell idle timeout (ISO8601 duration string).
 	idleTimeout string
+	// resourceURI is the WSMan Resource URI (default: Microsoft.PowerShell)
+	resourceURI string
 }
 
 // NewWSManBackend creates a new WSManBackend using the given WSMan client.
 func NewWSManBackend(client PoolClient, transport *WSManTransport) *WSManBackend {
 	return &WSManBackend{
-		client:    client,
-		transport: transport,
+		client:      client,
+		transport:   transport,
+		resourceURI: wsman.ResourceURIPowerShell, // Default
 	}
+}
+
+// SetResourceURI sets the WSMan ResourceURI (e.g. for JEA endpoints).
+func (b *WSManBackend) SetResourceURI(uri string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.resourceURI = uri
 }
 
 // SetIdleTimeout sets the WSMan shell idle timeout (ISO8601 duration, e.g. "PT30M").
@@ -116,6 +126,10 @@ func (b *WSManBackend) Init(ctx context.Context, pool *runspace.Pool) error {
 	if b.idleTimeout != "" {
 		options["IdleTimeout"] = b.idleTimeout
 	}
+	// Inject ResourceURI if custom
+	if b.resourceURI != "" && b.resourceURI != wsman.ResourceURIPowerShell {
+		options["ResourceURI"] = b.resourceURI
+	}
 
 	epr, err := b.client.Create(ctx, options, creationXML)
 	if err != nil {
@@ -125,7 +139,9 @@ func (b *WSManBackend) Init(ctx context.Context, pool *runspace.Pool) error {
 	// Enforce the correct ResourceURI for PowerShell.
 	// Some servers might return the generic WinRS URI in the Create response,
 	// but subsequent commands must target the PowerShell URI.
-	epr.ResourceURI = wsman.ResourceURIPowerShell
+	// Enforce the correct ResourceURI for PowerShell.
+	// We use the configured URI (defaulting to Microsoft.PowerShell).
+	epr.ResourceURI = b.resourceURI
 
 	b.epr = epr
 	// Configure transport to use the new EPR

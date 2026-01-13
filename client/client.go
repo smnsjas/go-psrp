@@ -195,8 +195,13 @@ type Config struct {
 	// VMID is the Hyper-V VM GUID (Required for TransportHvSocket).
 	VMID string
 
-	// ConfigurationName is the PowerShell configuration name (Optional, for HvSocket).
+	// ConfigurationName is the PowerShell configuration name (e.g., "Microsoft.Exchange").
+	// If empty, defaults to "Microsoft.PowerShell".
 	ConfigurationName string
+
+	// ResourceURI is the full WSMan resource URI (overrides ConfigurationName).
+	// Default: http://schemas.microsoft.com/powershell/Microsoft.PowerShell
+	ResourceURI string
 
 	// MaxRunspaces limits the number of concurrent pipeline executions.
 	// Default: 1 (safe). Set to > 1 to enable concurrent execution if server supports it.
@@ -743,7 +748,9 @@ func (c *Client) ReconnectSession(ctx context.Context, state *SessionState) erro
 		if c.wsman == nil {
 			return fmt.Errorf("wsman client not initialized")
 		}
-		c.backend = powershell.NewWSManBackend(c.wsman, powershell.NewWSManTransport(nil, nil, ""))
+		wsmanBackend := powershell.NewWSManBackend(c.wsman, powershell.NewWSManTransport(nil, nil, ""))
+		wsmanBackend.SetResourceURI(c.buildResourceURI())
+		c.backend = wsmanBackend
 
 		// Use the WSMan-specific Reconnect logic via Reattach
 		// We need to re-implement the core logic of Reconnect here because calling
@@ -986,7 +993,6 @@ func New(hostname string, cfg Config) (*Client, error) {
 		// Problem: RunspaceBackend.Init takes `*runspace.Pool`.
 		// `runspace.New` takes `transport`.
 		// `HvSocketBackend` Creates the transport (adapter).
-		// So `HvSocketBackend` creates `Adapter`. Adapter needs `runspaceGUID`.
 		// So `HvSocketBackend` needs `runspaceGUID` (PoolID).
 
 		// This means we must decide PoolID BEFORE creating Backend?
@@ -1120,6 +1126,24 @@ func (c *Client) connectInternal(ctx context.Context) error {
 				c.config.ConfigurationName,
 				c.poolID,
 			)
+		case TransportWSMan:
+			// Ensure wsman client is set (it should be from New)
+			if c.wsman == nil {
+				return fmt.Errorf("wsman client not initialized")
+			}
+			// Create WSMan transport
+			wTransport := powershell.NewWSManTransport(c.wsman, nil, "") // EPR will be set by Init
+
+			// Create backend
+			wsmanBackend := powershell.NewWSManBackend(c.wsman, wTransport)
+			wsmanBackend.SetResourceURI(c.buildResourceURI())
+
+			// Configure Idle Timeout if set
+			if c.config.IdleTimeout != "" {
+				wsmanBackend.SetIdleTimeout(c.config.IdleTimeout)
+			}
+
+			c.backend = wsmanBackend
 		default: // WSMan
 			// Ensure wsman client is set (it should be from New)
 			if c.wsman == nil {
@@ -2213,7 +2237,9 @@ func (c *Client) Reconnect(ctx context.Context, shellID string) error {
 			if c.wsman == nil {
 				return fmt.Errorf("wsman client not initialized")
 			}
-			c.backend = powershell.NewWSManBackend(c.wsman, powershell.NewWSManTransport(nil, nil, ""))
+			wsmanBackend := powershell.NewWSManBackend(c.wsman, powershell.NewWSManTransport(nil, nil, ""))
+			wsmanBackend.SetResourceURI(c.buildResourceURI())
+			c.backend = wsmanBackend
 		}
 	}
 
