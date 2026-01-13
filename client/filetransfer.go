@@ -14,6 +14,7 @@ import (
 	"sync"
 
 	"github.com/smnsjas/go-psrpcore/serialization"
+	"golang.org/x/sync/errgroup"
 )
 
 // Buffer pool for chunk allocation (zero-copy optimization)
@@ -208,6 +209,47 @@ func generateAppendScript(remotePath, chunkB64 string) string {
 	`, remotePathB64, chunkB64)
 }
 
+// generateOffsetWriteScript creates a PowerShell script to write a chunk at a specific offset.
+// This enables parallel chunk uploads by allowing out-of-order writes.
+func generateOffsetWriteScript(remotePath string, offset int64, chunkB64 string) string {
+	remotePathB64 := base64.StdEncoding.EncodeToString([]byte(remotePath))
+	return fmt.Sprintf(`
+		$ErrorActionPreference = 'Stop'
+		try {
+			$pathBytes = [System.Convert]::FromBase64String('%s')
+			$path = [System.Text.Encoding]::UTF8.GetString($pathBytes)
+			
+			$bytes = [Convert]::FromBase64String('%s')
+			$stream = [IO.File]::Open($path, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::Write, [IO.FileShare]::Write)
+			$stream.Seek(%d, [IO.SeekOrigin]::Begin) | Out-Null
+			$stream.Write($bytes, 0, $bytes.Length)
+			$stream.Close()
+		} catch {
+			Write-Error "Failed to write chunk at offset %d: $_"
+			exit 1
+		}
+	`, remotePathB64, chunkB64, offset, offset)
+}
+
+// generatePreallocateScript creates a PowerShell script to pre-allocate a file to a specific size.
+// This is used for parallel uploads to ensure the file exists with correct size before chunks are written.
+func generatePreallocateScript(remotePath string, size int64) string {
+	remotePathB64 := base64.StdEncoding.EncodeToString([]byte(remotePath))
+	return fmt.Sprintf(`
+		$ErrorActionPreference = 'Stop'
+		try {
+			$pathBytes = [System.Convert]::FromBase64String('%s')
+			$path = [System.Text.Encoding]::UTF8.GetString($pathBytes)
+			$stream = [IO.File]::Create($path)
+			$stream.SetLength(%d)
+			$stream.Close()
+		} catch {
+			Write-Error "Failed to pre-allocate file: $_"
+			exit 1
+		}
+	`, remotePathB64, size)
+}
+
 // CopyFile uploads a local file to the remote host.
 // Files are transferred in chunks using Base64 encoding over PowerShell remoting.
 // For large files, consider enabling compression or adjusting the chunk size.
@@ -279,9 +321,28 @@ func (c *Client) CopyFile(ctx context.Context, localPath, remotePath string, opt
 		"destination": remotePath,
 		"size_bytes":  totalSize,
 		"chunk_count": numChunks,
+		"parallel":    opt.MaxConcurrency > 1 && numChunks > 1,
 	})
 
-	// Step 1: Initialize remote file (create empty file)
+	// Use parallel mode if MaxConcurrency > 1 and file has multiple chunks
+	if opt.MaxConcurrency > 1 && numChunks > 1 {
+		if err := c.copyFileParallel(ctx, file, remotePath, opt, totalSize, progress); err != nil {
+			return err
+		}
+		// Security Event: Log completion
+		c.logSecurityEvent("FILE_TRANSFER_COMPLETE", map[string]interface{}{
+			"operation":   "CopyFile",
+			"destination": remotePath,
+			"bytes_sent":  totalSize,
+			"status":      "success",
+			"verified":    opt.VerifyChecksum,
+			"parallel":    true,
+		})
+		c.logInfo("CopyFile: Transfer complete (%d bytes, parallel)", totalSize)
+		return nil
+	}
+
+	// Serial mode: Step 1 - Initialize remote file (create empty file)
 	initScript := generateInitScript(remotePath)
 
 	c.logInfo("CopyFile: Initializing remote file %s", remotePath)
@@ -299,7 +360,7 @@ func (c *Client) CopyFile(ctx context.Context, localPath, remotePath string, opt
 		return fmt.Errorf("initialization failed: remote operation error")
 	}
 
-	// Step 2: Upload chunks sequentially (serial mode for Phase 1)
+	// Serial mode: Step 2 - Upload chunks sequentially
 	c.logInfo("CopyFile: Uploading %d chunks (%d bytes)", numChunks, totalSize)
 
 	// Get buffer from pool
@@ -439,6 +500,183 @@ func (c *Client) CopyFile(ctx context.Context, localPath, remotePath string, opt
 	})
 
 	c.logInfo("CopyFile: Transfer complete (%d bytes)", totalSize)
+	return nil
+}
+
+// copyFileParallel uploads a file using parallel chunk transfers.
+// Uses errgroup for coordinated cancellation and error handling.
+func (c *Client) copyFileParallel(ctx context.Context, file *os.File, remotePath string, opt FileTransferOptions, totalSize int64, progress *transferProgress) error {
+	chunkSize := int64(opt.ChunkSize)
+	numChunks := (totalSize + chunkSize - 1) / chunkSize
+
+	c.logInfo("CopyFile: Parallel upload with %d workers, %d chunks", opt.MaxConcurrency, numChunks)
+
+	// Step 1: Pre-allocate file to full size (enables parallel offset writes)
+	preallocScript := generatePreallocateScript(remotePath, totalSize)
+	_, err := c.Execute(ctx, preallocScript)
+	if err != nil {
+		c.logSecurityEvent("FILE_TRANSFER_FAILED", map[string]interface{}{
+			"operation": "CopyFile",
+			"phase":     "preallocate",
+			"error":     err.Error(),
+		})
+		if strings.Contains(err.Error(), "Access is denied") {
+			return fmt.Errorf("initialization failed: permission denied")
+		}
+		return fmt.Errorf("initialization failed: remote operation error")
+	}
+
+	// Step 2: Upload chunks in parallel
+	g, gctx := errgroup.WithContext(ctx)
+
+	// Semaphore to limit concurrency
+	sem := make(chan struct{}, opt.MaxConcurrency)
+
+	// Hasher for checksum (protected by mutex since we hash in-order after parallel upload)
+	var hasher hash.Hash
+	if opt.VerifyChecksum {
+		hasher = sha256.New()
+	}
+
+	// Track chunk results for ordered hashing
+	type chunkResult struct {
+		index int64
+		data  []byte
+	}
+	chunkResults := make([]chunkResult, numChunks)
+	var resultsMu sync.Mutex
+
+	for i := int64(0); i < numChunks; i++ {
+		chunkIndex := i // Capture loop variable
+
+		g.Go(func() error {
+			// Acquire semaphore
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-gctx.Done():
+				return gctx.Err()
+			}
+
+			offset := chunkIndex * chunkSize
+			length := chunkSize
+			if offset+length > totalSize {
+				length = totalSize - offset
+			}
+
+			// Read chunk at specific offset (thread-safe with ReadAt)
+			buf := make([]byte, length)
+			n, readErr := file.ReadAt(buf, offset)
+			if readErr != nil && readErr != io.EOF {
+				return fmt.Errorf("read chunk %d: %w", chunkIndex, readErr)
+			}
+
+			chunk := buf[:n]
+
+			// Store for later hash computation (in order)
+			if opt.VerifyChecksum {
+				resultsMu.Lock()
+				chunkResults[chunkIndex] = chunkResult{index: chunkIndex, data: chunk}
+				resultsMu.Unlock()
+			}
+
+			// Encode to Base64
+			b64 := base64.StdEncoding.EncodeToString(chunk)
+
+			// Validate Base64 size
+			if len(b64) > maxChunkBase64Size {
+				return fmt.Errorf("chunk %d too large after encoding: %d bytes", chunkIndex, len(b64))
+			}
+
+			// Write chunk at specific offset
+			script := generateOffsetWriteScript(remotePath, offset, b64)
+			_, execErr := c.Execute(gctx, script)
+			if execErr != nil {
+				c.logSecurityEvent("FILE_TRANSFER_FAILED", map[string]interface{}{
+					"operation": "CopyFile",
+					"phase":     "upload_chunk",
+					"chunk":     chunkIndex,
+					"error":     execErr.Error(),
+				})
+				return fmt.Errorf("failed to upload chunk %d/%d: remote operation error", chunkIndex+1, numChunks)
+			}
+
+			// Update progress
+			if progress != nil {
+				progress.update(int64(n))
+			}
+
+			// Log progress (but not too often to avoid spam)
+			if (chunkIndex+1)%10 == 0 || chunkIndex == numChunks-1 {
+				c.logInfo("CopyFile: Uploaded chunk %d/%d", chunkIndex+1, numChunks)
+			}
+
+			return nil
+		})
+	}
+
+	// Wait for all chunks to complete
+	if err := g.Wait(); err != nil {
+		return err
+	}
+
+	// Compute hash in order if verification enabled
+	if opt.VerifyChecksum {
+		for _, cr := range chunkResults {
+			hasher.Write(cr.data)
+		}
+
+		localHash := hex.EncodeToString(hasher.Sum(nil))
+
+		// Verify remote hash
+		remotePathB64 := base64.StdEncoding.EncodeToString([]byte(remotePath))
+		verifyScript := fmt.Sprintf(`
+			$ErrorActionPreference = 'Stop'
+			try {
+				$pathBytes = [System.Convert]::FromBase64String('%s')
+				$path = [System.Text.Encoding]::UTF8.GetString($pathBytes)
+				(Get-FileHash -Algorithm SHA256 -Path $path).Hash
+			} catch {
+				Write-Error "Failed to verify checksum: $_"
+				exit 1
+			}
+		`, remotePathB64)
+
+		result, verifyErr := c.Execute(ctx, verifyScript)
+		if verifyErr != nil {
+			c.logSecurityEvent("FILE_TRANSFER_FAILED", map[string]interface{}{
+				"operation": "CopyFile",
+				"phase":     "verify_checksum",
+				"error":     verifyErr.Error(),
+			})
+			return fmt.Errorf("failed to verify checksum: remote operation error")
+		}
+
+		var output string
+		if result != nil && len(result.Output) > 0 {
+			if s, ok := result.Output[0].(string); ok {
+				output = s
+			} else if psObj, ok := result.Output[0].(*serialization.PSObject); ok {
+				output = psObj.ToString
+			} else {
+				output = fmt.Sprintf("%v", result.Output[0])
+			}
+		}
+
+		remoteHash := strings.TrimSpace(output)
+		if !strings.EqualFold(remoteHash, localHash) {
+			c.logSecurityEvent("FILE_TRANSFER_FAILED", map[string]interface{}{
+				"operation":   "CopyFile",
+				"phase":       "checksum_mismatch",
+				"local_hash":  localHash,
+				"remote_hash": remoteHash,
+			})
+			return fmt.Errorf("checksum mismatch! local: %s, remote: %s", localHash, remoteHash)
+		}
+
+		c.logInfo("CopyFile: Checksum verified (SHA256: %s)", localHash)
+	}
+
 	return nil
 }
 
