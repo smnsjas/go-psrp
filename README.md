@@ -1,10 +1,13 @@
 # go-psrp
 
+<!-- markdownlint-disable MD013 -->
 [![Go Reference](https://pkg.go.dev/badge/github.com/smnsjas/go-psrp.svg)](https://pkg.go.dev/github.com/smnsjas/go-psrp)
 [![Go Report Card](https://goreportcard.com/badge/github.com/smnsjas/go-psrp)](https://goreportcard.com/report/github.com/smnsjas/go-psrp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+<!-- markdownlint-enable MD013 -->
 
-Complete PowerShell Remoting Protocol implementation for Go with multiple transport layers.
+Complete PowerShell Remoting Protocol implementation for Go with multiple
+transport layers.
 
 ## Overview
 
@@ -53,7 +56,8 @@ adding transport layers, making it ready for production PowerShell remoting.
   - Kerberos (pure Go via gokrb5, cross-platform)
   - Windows SSPI (native Negotiate/Kerberos on Windows)
 - **Full PSRP Support** - RunspacePools, Pipelines, Output streams
-- **Resilient** - Built-in keepalive support (transport-aware) and configurable idle timeouts
+- **Resilient** - Built-in keepalive support (transport-aware) and
+  configurable idle timeouts
 - **High-Level API** - Simple command execution
 - **Secure** - TLS 1.2+ by default, pure Go implementation
 
@@ -165,7 +169,8 @@ err := c2.Reconnect(ctx, shellID)
 
 **Automatic Reconnection**
 
-Enable automatic reconnection for transient failures (network issues, VM pause/resume, etc.):
+Enable automatic reconnection for transient failures (network issues, VM
+pause/resume, etc.):
 
 ```go
 cfg := client.DefaultConfig()
@@ -195,7 +200,8 @@ This is especially useful for:
 
 **Command Retry (Transient Errors)**
 
-Configure retry logic for transient command-level errors (network blips, timeouts):
+Configure retry logic for transient command-level errors (network blips,
+timeouts):
 
 ```go
 // Enable command retry
@@ -437,8 +443,10 @@ if result.HadErrors {
 
 ## Related Projects
 
+<!-- markdownlint-disable MD013 -->
 - [go-psrpcore](https://github.com/smnsjas/go-psrpcore) - Sans-IO PSRP protocol library
 - [pypsrp](https://github.com/jborean93/pypsrp) - Python PSRP client (reference implementation)
+<!-- markdownlint-enable MD013 -->
 
 ## License
 
