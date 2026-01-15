@@ -120,6 +120,7 @@ func main() {
 	noOverwrite := flag.Bool("no-overwrite", false, "Fail if destination file already exists")
 
 	autoReconnect := flag.Bool("auto-reconnect", false, "Enable automatic reconnection on failures")
+	useCmd := flag.Bool("cmd", false, "Use WinRS (cmd.exe) instead of PowerShell for command execution")
 
 	flag.Parse()
 
@@ -474,9 +475,18 @@ func main() {
 		}
 	} else {
 		// Create new session
-		if err := psrp.Connect(ctx); err != nil {
-			fmt.Fprintf(os.Stderr, "Error connecting: %v\n", err)
-			os.Exit(1)
+		if *useCmd {
+			// WinRS mode - just connect WSMan, skip PSRP runspace
+			if err := psrp.ConnectWSManOnly(ctx); err != nil {
+				fmt.Fprintf(os.Stderr, "Error connecting (WinRS): %v\n", err)
+				os.Exit(1)
+			}
+		} else {
+			// PowerShell mode - full PSRP connection
+			if err := psrp.Connect(ctx); err != nil {
+				fmt.Fprintf(os.Stderr, "Error connecting: %v\n", err)
+				os.Exit(1)
+			}
 		}
 	}
 
@@ -486,8 +496,11 @@ func main() {
 	}
 
 	fmt.Println("Connected!")
-	fmt.Printf("State: %s\n", psrp.State())
-	fmt.Printf("Health: %s\n", psrp.Health())
+	if !*useCmd {
+		// Only show PSRP state for PowerShell mode
+		fmt.Printf("State: %s\n", psrp.State())
+		fmt.Printf("Health: %s\n", psrp.Health())
+	}
 
 	// Handle recovery
 	if *recoverCommandID != "" {
@@ -739,56 +752,85 @@ func main() {
 		fmt.Printf("Executing: %s\n", *script)
 		fmt.Println("---")
 
-		result, err := psrp.Execute(ctx, *script)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error executing script: %v\n", err)
-			os.Exit(1)
-		}
+		if *useCmd {
+			// WinRS (cmd.exe) execution
+			cmdResult, err := psrp.ExecuteCmd(ctx, *script)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error executing command: %v\n", err)
+				os.Exit(1)
+			}
 
-		// Print output - format each object for display
-		fmt.Println("Output:")
-		for _, obj := range result.Output {
-			fmt.Println(formatObject(obj))
-		}
+			// Print stdout
+			if cmdResult.Stdout != "" {
+				fmt.Println("Output:")
+				fmt.Print(cmdResult.Stdout)
+			}
 
-		// Print information stream (Write-Host output)
-		if len(result.Information) > 0 {
-			fmt.Println("Information:")
-			for _, obj := range result.Information {
+			// Print stderr
+			if cmdResult.Stderr != "" {
+				fmt.Println("Errors:")
+				fmt.Print(cmdResult.Stderr)
+			}
+
+			// Print exit code
+			fmt.Printf("\nExit Code: %d\n", cmdResult.ExitCode)
+
+			if cmdResult.ExitCode != 0 {
+				os.Exit(cmdResult.ExitCode)
+			}
+		} else {
+			// PowerShell (PSRP) execution
+			result, err := psrp.Execute(ctx, *script)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error executing script: %v\n", err)
+				os.Exit(1)
+			}
+
+			// Print output - format each object for display
+			fmt.Println("Output:")
+			for _, obj := range result.Output {
 				fmt.Println(formatObject(obj))
 			}
-		}
 
-		// Print warnings
-		if len(result.Warnings) > 0 {
-			fmt.Println("Warnings:")
-			for _, obj := range result.Warnings {
-				fmt.Println(formatObject(obj))
+			// Print information stream (Write-Host output)
+			if len(result.Information) > 0 {
+				fmt.Println("Information:")
+				for _, obj := range result.Information {
+					fmt.Println(formatObject(obj))
+				}
 			}
-		}
 
-		// Print verbose
-		if len(result.Verbose) > 0 {
-			fmt.Println("Verbose:")
-			for _, obj := range result.Verbose {
-				fmt.Println(formatObject(obj))
+			// Print warnings
+			if len(result.Warnings) > 0 {
+				fmt.Println("Warnings:")
+				for _, obj := range result.Warnings {
+					fmt.Println(formatObject(obj))
+				}
 			}
-		}
 
-		// Print debug
-		if len(result.Debug) > 0 {
-			fmt.Println("Debug:")
-			for _, obj := range result.Debug {
-				fmt.Println(formatObject(obj))
+			// Print verbose
+			if len(result.Verbose) > 0 {
+				fmt.Println("Verbose:")
+				for _, obj := range result.Verbose {
+					fmt.Println(formatObject(obj))
+				}
 			}
-		}
 
-		if result.HadErrors {
-			fmt.Fprintln(os.Stderr, "Errors:")
-			for _, obj := range result.Errors {
-				fmt.Fprintln(os.Stderr, formatObject(obj))
+			// Print debug
+			if len(result.Debug) > 0 {
+				fmt.Println("Debug:")
+				for _, obj := range result.Debug {
+					fmt.Println(formatObject(obj))
+				}
 			}
-			os.Exit(1)
+
+			if result.HadErrors {
+				fmt.Fprintln(os.Stderr, "Errors:")
+				for _, obj := range result.Errors {
+					fmt.Fprintln(os.Stderr, formatObject(obj))
+				}
+				os.Exit(1)
+			}
 		}
 	}
 

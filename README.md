@@ -417,6 +417,7 @@ go build ./cmd/psrp-client
 | `-restore-session` | Restore session state from file | - |
 | `-cbt` | Enable NTLM Channel Binding Tokens (Extended Protection) | `false` |
 | `-auto-reconnect` | Enable automatic reconnection on failures | `false` |
+| `-cmd` | Use WinRS (cmd.exe) instead of PowerShell | `false` |
 
 ## Package Structure
 
@@ -430,6 +431,7 @@ go build ./cmd/psrp-client
 <!-- markdownlint-enable MD013 -->
 | `wsman/transport` | HTTP/TLS transport layer |
 | `hvsock` | Hyper-V Socket connectivity (Windows only) |
+| `winrs` | Windows Remote Shell (cmd.exe) support |
 
 ## File Transfer
 
@@ -456,6 +458,31 @@ The client includes optimized file transfer capabilities:
 | `-dest` | Remote destination path | - |
 | `-no-overwrite` | Fail if destination file exists | `false` |
 | `-chunk-size` | Transfer chunk size (e.g. `256KB`, `1MB`) | Auto |
+
+## WinRS (Windows Remote Shell)
+
+For simple cmd.exe commands, use WinRS instead of PowerShell for faster execution:
+
+```bash
+# CLI - Run cmd.exe command
+./psrp-client -server host -user admin -tls -cmd "dir C:\\"
+
+# Compare output format (raw stdout vs PowerShell objects)
+./psrp-client ... -cmd "whoami"    # Fast, raw output
+./psrp-client ... -script "whoami" # Rich PowerShell objects
+```
+
+```go
+// Go API
+result, err := c.ExecuteCmd(ctx, "dir /b C:\\Windows")
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(result.Stdout)    // Raw string output
+fmt.Println(result.ExitCode)  // Process exit code
+```
+
+WinRS is faster for basic commands as it avoids PSRP protocol overhead.
 
 ## Configuration
 
