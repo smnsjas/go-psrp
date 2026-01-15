@@ -70,7 +70,7 @@ func (c *Client) Create(ctx context.Context, options map[string]string, creation
 		WithAction(ActionCreate).
 		WithTo(c.endpoint).
 		WithResourceURI(resourceURI).
-		WithMaxEnvelopeSize(153600).
+		WithMaxEnvelopeSize(512000).
 		WithOperationTimeout("PT60S").
 		WithMessageID("uuid:" + strings.ToUpper(uuid.New().String())).
 		WithReplyTo(AddressAnonymous).
@@ -151,7 +151,7 @@ func (c *Client) Command(ctx context.Context, epr *EndpointReference, commandID,
 		WithSessionID(c.sessionID).
 		WithLocale("en-US").
 		WithDataLocale("en-US").
-		WithMaxEnvelopeSize(153600).
+		WithMaxEnvelopeSize(512000).
 		WithOperationTimeout("PT60S").
 		WithShellNamespace()
 
@@ -205,7 +205,7 @@ func (c *Client) Send(ctx context.Context, epr *EndpointReference, commandID, st
 		WithResourceURI(epr.ResourceURI).
 		WithMessageID("uuid:" + strings.ToUpper(uuid.New().String())).
 		WithReplyTo(AddressAnonymous).
-		WithMaxEnvelopeSize(153600).
+		WithMaxEnvelopeSize(512000).
 		WithOperationTimeout("PT60S").
 		WithSessionID(c.sessionID).
 		WithLocale("en-US").
@@ -243,7 +243,7 @@ func (c *Client) Receive(ctx context.Context, epr *EndpointReference, commandID 
 		WithResourceURI(epr.ResourceURI).
 		WithMessageID("uuid:"+strings.ToUpper(uuid.New().String())).
 		WithReplyTo(AddressAnonymous).
-		WithMaxEnvelopeSize(153600).
+		WithMaxEnvelopeSize(512000).
 		WithOperationTimeout("PT20S").
 		WithSessionID(c.sessionID).
 		WithLocale("en-US").
@@ -538,7 +538,7 @@ func (c *Client) Connect(ctx context.Context, shellID string, connectXML string)
 		WithReplyTo(AddressAnonymous).
 		WithSessionID(c.sessionID).
 		WithShellNamespace().
-		WithMaxEnvelopeSize(153600).
+		WithMaxEnvelopeSize(512000).
 		WithOperationTimeout("PT60S").
 		WithLocale("en-US").
 		WithDataLocale("en-US").
@@ -610,7 +610,7 @@ func (c *Client) Enumerate(ctx context.Context) ([]EnumerateShell, error) {
 		WithMessageID("uuid:" + strings.ToUpper(uuid.New().String())).
 		WithReplyTo(AddressAnonymous).
 		WithSessionID(c.sessionID).
-		WithMaxEnvelopeSize(153600).
+		WithMaxEnvelopeSize(512000).
 		WithOperationTimeout("PT60S")
 
 	// Body with OptimizeEnumeration and MaxElements
@@ -659,7 +659,7 @@ func (c *Client) EnumerateCommands(ctx context.Context, shellID string) ([]strin
 		WithMessageID("uuid:" + strings.ToUpper(uuid.New().String())).
 		WithReplyTo(AddressAnonymous).
 		WithSessionID(c.sessionID).
-		WithMaxEnvelopeSize(153600).
+		WithMaxEnvelopeSize(512000).
 		WithOperationTimeout("PT60S")
 
 	// Body with filter by ShellId
@@ -718,7 +718,7 @@ func (c *Client) Subscribe(ctx context.Context, resourceURI string, filter strin
 		WithMessageID("uuid:"+strings.ToUpper(uuid.New().String())).
 		WithReplyTo(AddressAnonymous).
 		WithSessionID(c.sessionID).
-		WithMaxEnvelopeSize(153600).
+		WithMaxEnvelopeSize(512000).
 		WithOperationTimeout("PT60S").
 		WithOption("WSMAN_CMDSHELL_OPTION_KEEPALIVE", "True")
 
@@ -789,7 +789,7 @@ func (c *Client) Unsubscribe(ctx context.Context, sub *Subscription) error {
 		WithMessageID("uuid:" + strings.ToUpper(uuid.New().String())).
 		WithReplyTo(AddressAnonymous).
 		WithSessionID(c.sessionID).
-		WithMaxEnvelopeSize(153600).
+		WithMaxEnvelopeSize(512000).
 		WithOperationTimeout("PT60S")
 
 	// Add Selectors from Manager
@@ -829,7 +829,7 @@ func (c *Client) Pull(ctx context.Context, resourceURI string, enumContext strin
 		WithMessageID("uuid:" + strings.ToUpper(uuid.New().String())).
 		WithReplyTo(AddressAnonymous).
 		WithSessionID(c.sessionID).
-		WithMaxEnvelopeSize(153600).
+		WithMaxEnvelopeSize(512000).
 		WithOperationTimeout("PT20S")
 
 	// Pull Body

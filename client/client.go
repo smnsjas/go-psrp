@@ -507,6 +507,14 @@ func (c *Client) logError(format string, v ...interface{}) {
 	}
 }
 
+// logSecurityEvent logs a security event with the given event type and details.
+// This is used by file transfer operations for security audit logging.
+func (c *Client) logSecurityEvent(eventType string, details map[string]interface{}) {
+	if c.securityLogger != nil {
+		c.securityLogger.LogEvent("file_transfer", eventType, SeverityInfo, OutcomeSuccess, details)
+	}
+}
+
 // isPoolBrokenError checks if an error indicates the pool is broken.
 func (c *Client) isPoolBrokenError(err error) bool {
 	if err == nil {

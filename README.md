@@ -431,6 +431,32 @@ go build ./cmd/psrp-client
 | `wsman/transport` | HTTP/TLS transport layer |
 | `hvsock` | Hyper-V Socket connectivity (Windows only) |
 
+## File Transfer
+
+The client includes optimized file transfer capabilities:
+
+- **Streaming Transfer**: Uses a single pipeline for high throughput (~5MB/s on HvSocket), bypassing the per-chunk overhead of standard PSRP.
+- **Transport-Aware Chunking**: Automatically selects optimal chunk sizes (256KB for WSMan, 1MB for HvSocket).
+- **Zero-Copy**: Minimizes memory allocations during transfer.
+- **Safety**: Use `-no-overwrite` to prevent accidental data loss.
+
+```bash
+# Upload file with safety check
+./psrp-client ... -upload src.bin -dest C:\dst.bin -no-overwrite
+
+# Manually tune chunk size
+./psrp-client ... -upload src.bin -dest C:\dst.bin -chunk-size 1MB
+```
+
+### CLI Flags for File Transfer
+
+| Flag | Description | Default |
+| ---- | ----------- | ------- |
+| `-upload` | Local path to file to upload | - |
+| `-dest` | Remote destination path | - |
+| `-no-overwrite` | Fail if destination file exists | `false` |
+| `-chunk-size` | Transfer chunk size (e.g. `256KB`, `1MB`) | Auto |
+
 ## Configuration
 
 ### WinRM Server Setup
