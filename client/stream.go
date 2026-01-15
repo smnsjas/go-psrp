@@ -43,6 +43,16 @@ func (sr *StreamResult) Cancel() {
 // that provides access to output as it is produced.
 // The caller is responsible for consuming the output channels and calling Wait().
 func (c *Client) ExecuteStream(ctx context.Context, script string) (*StreamResult, error) {
+	return c.executeStreamInternal(ctx, script, true)
+}
+
+// ExecuteStreamWithInput runs a PowerShell script asynchronously and returns a StreamResult
+// that is open for input. The caller MUST call sr.CloseInput() (or sr.pipeline.CloseInput) when done sending input.
+func (c *Client) ExecuteStreamWithInput(ctx context.Context, script string) (*StreamResult, error) {
+	return c.executeStreamInternal(ctx, script, false)
+}
+
+func (c *Client) executeStreamInternal(ctx context.Context, script string, closeInput bool) (*StreamResult, error) {
 	// Acquire semaphore first
 	c.mu.Lock()
 	if c.semaphore == nil {
@@ -68,8 +78,10 @@ func (c *Client) ExecuteStream(ctx context.Context, script string) (*StreamResul
 	}
 	// For HvSocket: dispatch loop was started in Connect()
 
-	// Close input for script execution
-	_ = psrpPipeline.CloseInput(ctx)
+	if closeInput {
+		// Close input for script execution
+		_ = psrpPipeline.CloseInput(ctx)
+	}
 
 	sr := &StreamResult{
 		pipeline:    psrpPipeline,
@@ -90,4 +102,14 @@ func (c *Client) ExecuteStream(ctx context.Context, script string) (*StreamResul
 	}
 
 	return sr, nil
+}
+
+// SendInput sends data to the pipeline input stream.
+func (sr *StreamResult) SendInput(ctx context.Context, data interface{}) error {
+	return sr.pipeline.SendInput(ctx, data)
+}
+
+// CloseInput closes the pipeline input stream.
+func (sr *StreamResult) CloseInput(ctx context.Context) error {
+	return sr.pipeline.CloseInput(ctx)
 }

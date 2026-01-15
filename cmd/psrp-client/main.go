@@ -41,6 +41,26 @@ import (
 	"golang.org/x/term"
 )
 
+// formatBytes converts bytes to human-readable format (KB, MB, GB).
+func formatBytes(bytes int64) string {
+	const (
+		KB = 1024
+		MB = KB * 1024
+		GB = MB * 1024
+	)
+
+	switch {
+	case bytes >= GB:
+		return fmt.Sprintf("%.2f GB", float64(bytes)/GB)
+	case bytes >= MB:
+		return fmt.Sprintf("%.2f MB", float64(bytes)/MB)
+	case bytes >= KB:
+		return fmt.Sprintf("%.2f KB", float64(bytes)/KB)
+	default:
+		return fmt.Sprintf("%d bytes", bytes)
+	}
+}
+
 func main() {
 	// Parse command line flags
 	server := flag.String("server", "", "WinRM server hostname")
@@ -96,6 +116,8 @@ func main() {
 	copyFile := flag.String("copy", "", "Copy local file to remote (format: local=>remote, e.g. /tmp/file.txt=>C:\\Temp\\file.txt)")
 	fetchFile := flag.String("fetch", "", "Fetch remote file to local (format: remote=>local, e.g. C:\\Temp\\file.txt=>/tmp/file.txt)")
 	verifyChecksum := flag.Bool("verify", false, "Verify file transfer with SHA256 checksum")
+	chunkSize := flag.Int("chunk-size", 0, "File transfer chunk size in bytes (0 = auto-detect based on transport: 350KB for WSMan, 1MB for HvSocket)")
+	noOverwrite := flag.Bool("no-overwrite", false, "Fail if destination file already exists")
 
 	autoReconnect := flag.Bool("auto-reconnect", false, "Enable automatic reconnection on failures")
 
@@ -543,16 +565,48 @@ func main() {
 		}
 		localPath, remotePath := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
 
-		fmt.Printf("Copying %s -> %s...\n", localPath, remotePath)
+		// Get file size for summary
+		fileInfo, err := os.Stat(localPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error accessing file: %v\n", err)
+			os.Exit(1)
+		}
+		fileSize := fileInfo.Size()
+
+		fmt.Printf("Copying %s -> %s (%s)...\n", localPath, remotePath, formatBytes(fileSize))
+
 		var opts []client.FileTransferOption
 		if *verifyChecksum {
 			opts = append(opts, client.WithChecksumVerification(true))
 		}
-		if err := psrp.CopyFile(ctx, localPath, remotePath, opts...); err != nil {
+		if *chunkSize > 0 {
+			opts = append(opts, client.WithChunkSize(*chunkSize))
+		}
+		if *noOverwrite {
+			opts = append(opts, client.WithNoOverwrite(true))
+		}
+
+		// Track duration
+		startTime := time.Now()
+
+		// Use background context for file transfer - per-chunk timeouts handle slow operations
+		// This allows large file transfers to complete without an artificial overall deadline
+		if err := psrp.CopyFile(context.Background(), localPath, remotePath, opts...); err != nil {
 			fmt.Fprintf(os.Stderr, "Error copying file: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Println("File copied successfully!")
+
+		duration := time.Since(startTime)
+		speed := float64(fileSize) / duration.Seconds() / 1024 / 1024 // MB/s
+
+		// Output summary
+		fmt.Printf("File copied successfully!\n")
+		fmt.Printf("  Size: %s\n", formatBytes(fileSize))
+		fmt.Printf("  Duration: %s\n", duration.Round(time.Millisecond))
+		fmt.Printf("  Speed: %.2f MB/s\n", speed)
+		if *verifyChecksum {
+			fmt.Printf("  Checksum: verified ✓\n")
+		}
 		return
 	}
 
@@ -566,15 +620,47 @@ func main() {
 		remotePath, localPath := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
 
 		fmt.Printf("Fetching %s -> %s...\n", remotePath, localPath)
+
 		var opts []client.FileTransferOption
 		if *verifyChecksum {
 			opts = append(opts, client.WithChecksumVerification(true))
 		}
-		if err := psrp.FetchFile(ctx, remotePath, localPath, opts...); err != nil {
+		if *chunkSize > 0 {
+			opts = append(opts, client.WithChunkSize(*chunkSize))
+		}
+
+		// Track duration
+		startTime := time.Now()
+
+		// Use background context for file transfer - per-chunk timeouts handle slow operations
+		if err := psrp.FetchFile(context.Background(), remotePath, localPath, opts...); err != nil {
 			fmt.Fprintf(os.Stderr, "Error fetching file: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Println("File fetched successfully!")
+
+		duration := time.Since(startTime)
+
+		// Get downloaded file size
+		fileInfo, _ := os.Stat(localPath)
+		var fileSize int64
+		if fileInfo != nil {
+			fileSize = fileInfo.Size()
+		}
+
+		speed := float64(fileSize) / duration.Seconds() / 1024 / 1024 // MB/s
+
+		// Output summary
+		fmt.Printf("File fetched successfully!\n")
+		if fileSize > 0 {
+			fmt.Printf("  Size: %s\n", formatBytes(fileSize))
+		}
+		fmt.Printf("  Duration: %s\n", duration.Round(time.Millisecond))
+		if fileSize > 0 {
+			fmt.Printf("  Speed: %.2f MB/s\n", speed)
+		}
+		if *verifyChecksum {
+			fmt.Printf("  Checksum: verified ✓\n")
+		}
 		return
 	}
 

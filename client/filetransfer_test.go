@@ -109,8 +109,9 @@ func TestSanitizeForPowerShell(t *testing.T) {
 func TestDefaultFileTransferOptions(t *testing.T) {
 	opts := DefaultFileTransferOptions()
 
+	// Default is 256KB (safe for 500KB WSMan envelope)
 	if opts.ChunkSize != 256*1024 {
-		t.Errorf("Expected ChunkSize 256KB, got %d", opts.ChunkSize)
+		t.Errorf("Expected ChunkSize 256KB (262144), got %d", opts.ChunkSize)
 	}
 	if opts.MaxConcurrency != 4 {
 		t.Errorf("Expected MaxConcurrency 4, got %d", opts.MaxConcurrency)
@@ -120,6 +121,20 @@ func TestDefaultFileTransferOptions(t *testing.T) {
 	}
 	if opts.VerifyChecksum {
 		t.Error("Expected VerifyChecksum false by default")
+	}
+}
+
+func TestDefaultFileTransferOptionsForTransport(t *testing.T) {
+	// WSMan should use 256KB (safe for 500KB envelope)
+	wsmanOpts := DefaultFileTransferOptionsForTransport(TransportWSMan)
+	if wsmanOpts.ChunkSize != 256*1024 {
+		t.Errorf("WSMan: Expected ChunkSize 256KB, got %d", wsmanOpts.ChunkSize)
+	}
+
+	// HvSocket should use 1MB (no envelope limit)
+	hvOpts := DefaultFileTransferOptionsForTransport(TransportHvSocket)
+	if hvOpts.ChunkSize != 1024*1024 {
+		t.Errorf("HvSocket: Expected ChunkSize 1MB, got %d", hvOpts.ChunkSize)
 	}
 }
 

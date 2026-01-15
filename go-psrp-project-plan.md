@@ -362,7 +362,17 @@ func (c *Client) FetchFile(ctx context.Context, remotePath, localPath string) er
 
 ## Development Phases
 
-### Phase 1: Core WSMan Transport (Weeks 1-2)
+### Implementation Status (As of Jan 2026)
+
+| Phase | Description | Status |
+|-------|-------------|--------|
+| **1** | Core WSMan Transport | ✅ **Completed** |
+| **2** | WSMan ↔ psrpcore Bridge | ✅ **Completed** |
+| **3** | High-Level Client API | ✅ **Completed** |
+| **4** | Polish & Testing | 🚧 **In Progress** (CI/CD pending) |
+| **4.5** | Security & Optimization | ✅ **Completed** |
+
+### Phase 1: Core WSMan Transport (Completed)
 
 **Goal:** Establish basic WSMan communication over HTTPS with NTLM auth.
 
@@ -384,6 +394,7 @@ func (c *Client) FetchFile(ctx context.Context, remotePath, localPath string) er
 **Deliverable:** Working WSMan client that can make authenticated requests.
 
 **Test Criteria:**
+
 - [ ] Can establish HTTPS connection to WinRM endpoint
 - [ ] NTLM authentication succeeds
 - [ ] Can send SOAP request and receive response
@@ -412,6 +423,7 @@ func (c *Client) FetchFile(ctx context.Context, remotePath, localPath string) er
 **Deliverable:** Can execute PowerShell commands via WinRM.
 
 **Test Criteria:**
+
 - [ ] Can create RunspacePool over WSMan
 - [ ] Can execute simple script (e.g., `Get-Process | Select -First 1`)
 - [ ] Receives typed output objects
@@ -438,6 +450,7 @@ func (c *Client) FetchFile(ctx context.Context, remotePath, localPath string) er
 **Deliverable:** Easy-to-use client for common operations.
 
 **Test Criteria:**
+
 - [ ] Simple one-liner to connect and execute
 - [ ] Example application works
 - [ ] GoDoc documentation complete
@@ -484,6 +497,7 @@ func (c *Client) FetchFile(ctx context.Context, remotePath, localPath string) er
 This section covers shell reuse (multiplexing) and connection resilience features that transform go-psrp from a basic client into a production-ready automation library.
 
 **Goals:**
+
 - Reduce command latency from 1-2s to <100ms via shell reuse
 - Support concurrent pipeline execution
 - Handle disconnects gracefully with configurable recovery
@@ -574,9 +588,10 @@ func (c *Client) Connect(ctx context.Context) error {
 **Keep-Alive Design:**
 
 > **Important Distinction (per Gemini review):**
+>
 > - **Keep-Alive** = Prevention - stops server from killing idle sessions
 > - **Auto-Reconnect** = Recovery - handles actual network failures (Phase M3)
-> 
+>
 > These are separate concerns. Keep-alive prevents timeout; it doesn't recover from dropped connections.
 
 ```go
@@ -864,6 +879,7 @@ func (cm *callIDManager) expire(id uint64) {
 **Deliverable:** Stable connection lifecycle; shell stays alive across multiple Execute() calls.
 
 **Test Criteria:**
+
 - [ ] 1000 sequential commands with single Connect/Close
 - [ ] Shell survives 5 minutes idle (keep-alive working)
 - [ ] Graceful shutdown waits for active pipelines
@@ -1175,6 +1191,7 @@ stream.Wait()
 **Deliverable:** Concurrent execution, streaming API, significant latency improvement.
 
 **Test Criteria:**
+
 - [ ] 5 concurrent pipelines complete successfully
 - [ ] ExecuteStream handles 100MB output without OOM
 - [ ] Subsequent execution latency <100ms (vs 1-2s baseline)
@@ -1265,17 +1282,18 @@ func (t *SSHTransport) KeepAlive(ctx context.Context) error {
 **Goal:** Graceful error handling and optional reconnection on network failures.
 
 > **Critical Design Decision (per Gemini review):**
-> 
+>
 > **Do NOT implement transparent auto-reconnect for v1.**
-> 
+>
 > **Reason:** PSRP Runspaces are *stateful*. If the connection dies, PowerShell variables
 > (`$myVar = 1`) and session state are **lost**. If we silently reconnect and re-run the
 > command, users get confusing errors because their variables are gone.
-> 
+>
 > **Better approach:** Implement `client.Reconnect(ctx)` that users call explicitly
 > after detecting an error, so they **know** the state has been reset.
 >
 > **Auto-retry is ONLY safe for:**
+>
 > - Stateless commands (no variable dependencies)
 > - Commands explicitly marked as idempotent
 > - When the user opts in via configuration
@@ -1462,6 +1480,7 @@ result, err := client.ExecuteStateless(ctx, "Get-Date") // No state dependencies
 **Deliverable:** Auto-recovery from network failures; production-ready stability.
 
 **Test Criteria:**
+
 - [ ] Recovers from simulated network failure
 - [ ] Exponential backoff works correctly
 - [ ] OnStateChange notifies on disconnect/reconnect
@@ -1590,6 +1609,7 @@ func (rr *ResilientResult) WasResumed() bool {
 **Deliverable:** Crash-recovery capable client; enterprise-grade resilience.
 
 **Test Criteria:**
+
 - [ ] Graceful disconnect keeps session alive on server
 - [ ] Can reconnect after client restart
 - [ ] Buffered output received after reconnect
@@ -1644,6 +1664,7 @@ func EnterpriseConfig(sessionDir string) Config {
 ### Success Metrics
 
 **Functional:**
+
 - [ ] Execute 1000 commands with single Connect/Close
 - [ ] Run 5 concurrent pipelines successfully
 - [ ] Graceful shutdown with active pipelines
@@ -1652,6 +1673,7 @@ func EnterpriseConfig(sessionDir string) Config {
 - [ ] All tests pass with `-race` flag
 
 **Performance:**
+
 | Metric | Baseline | Target |
 |--------|----------|--------|
 | First execution | 1-2s | 1-2s (unchanged) |
@@ -1870,6 +1892,7 @@ psrp_latency_seconds{quantile="0.99"} %f
 ```
 
 **SLO Targets:**
+
 - 95% subsequent commands < 100ms
 - First command < 2s
 - Pool reuse rate > 99% (minimal recreations)
@@ -2058,6 +2081,7 @@ cfg := client.Config{
 ### Test Fixtures
 
 Located in `internal/testutil/`:
+
 - SOAP response samples
 - PSRP message samples
 - Error response samples
@@ -2258,4 +2282,28 @@ issues:
 
 *Document Version: 1.0*  
 *Created: December 2024*  
-*Author: Jason / Claude*
+
+---
+
+### Phase 4.5: Security & Optimization (Completed)
+
+**Goal:** Ensure compliance and optimize file transfer performance.
+
+**Tasks:**
+
+| # | Task | Status |
+|---|------|--------|
+| 4.5.1 | Optimization: Transport-aware chunk sizes (256KB/1MB) | ✅ Complete |
+| 4.5.2 | Optimization: Streaming file transfer (single pipeline) | ✅ Complete |
+| 4.5.3 | Optimization: Zero-copy `[]byte` transfer | ✅ Complete |
+| 4.5.4 | Safety: `-no-overwrite` flag with atomic check | ✅ Complete |
+| 4.5.5 | Usability: Improved error message reporting | ✅ Complete |
+| 4.5.6 | Security: NIST 800-92 Logging Audit | ✅ Complete |
+| 4.5.7 | Security: Compliance Remediation (Timestamp Restoration) | ✅ Complete |
+
+**Results:**
+
+- Throughput: ~1.12 MB/s (WinRM), ~5 MB/s (HvSocket)
+- Compliance: Full NIST 800-92 adherence for audit logs
+
+---

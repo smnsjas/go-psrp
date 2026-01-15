@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/smnsjas/go-psrpcore/serialization"
 	"golang.org/x/sync/errgroup"
@@ -54,11 +55,22 @@ type FileTransferOptions struct {
 
 	// Timeout overrides the automatic timeout calculation.
 	// If zero, timeout is calculated based on file size.
+	// DEPRECATED: Use ChunkTimeout instead. This field is ignored.
 	Timeout int
+
+	// ChunkTimeout is the timeout for each individual chunk operation.
+	// Default: 60 seconds. If a single chunk takes longer than this, the
+	// transfer fails. There is no overall transfer timeout - as long as
+	// chunks keep completing within ChunkTimeout, the transfer continues.
+	ChunkTimeout time.Duration
 
 	// MaxFileSize limits the total file size in bytes to prevent resource exhaustion.
 	// Default: 1GB (can be disabled by setting to -1).
 	MaxFileSize int64
+
+	// NoOverwrite prevents overwriting an existing destination file.
+	// If true, the transfer fails if the file exists.
+	NoOverwrite bool
 }
 
 // FileTransferOption is a functional option for configuring file transfers.
@@ -100,14 +112,47 @@ func WithMaxFileSize(bytes int64) FileTransferOption {
 	return func(o *FileTransferOptions) { o.MaxFileSize = bytes }
 }
 
-// DefaultFileTransferOptions returns sensible defaults.
+// WithChunkTimeout sets the timeout for each individual chunk operation.
+// Default: 60 seconds. As long as chunks complete within this timeout,
+// the transfer will continue indefinitely.
+func WithChunkTimeout(d time.Duration) FileTransferOption {
+	return func(o *FileTransferOptions) { o.ChunkTimeout = d }
+}
+
+// WithNoOverwrite sets whether to fail if the destination file exists.
+func WithNoOverwrite(noOverwrite bool) FileTransferOption {
+	return func(o *FileTransferOptions) { o.NoOverwrite = noOverwrite }
+}
+
+// DefaultFileTransferOptions returns sensible defaults for WSMan transport.
+// For HvSocket, use DefaultFileTransferOptionsForTransport(TransportHvSocket).
 func DefaultFileTransferOptions() FileTransferOptions {
 	return FileTransferOptions{
-		ChunkSize:      256 * 1024, // 256KB
+		ChunkSize:      256 * 1024, // 256KB safe for 500KB envelope (341KB after Base64)
 		MaxConcurrency: 4,
 		UseCompression: false,
 		VerifyChecksum: false,
+		ChunkTimeout:   60 * time.Second, // Per-chunk timeout (no overall timeout)
 	}
+}
+
+// DefaultFileTransferOptionsForTransport returns optimal defaults based on transport type.
+// WSMan: 256KB chunks (limited by MaxEnvelopeSizeKb, conservative to avoid edge cases)
+// HvSocket: 1MB chunks (no envelope limit)
+func DefaultFileTransferOptionsForTransport(transport TransportType) FileTransferOptions {
+	opts := DefaultFileTransferOptions()
+
+	switch transport {
+	case TransportHvSocket:
+		// HvSocket has no SOAP envelope limit - use larger chunks
+		opts.ChunkSize = 1024 * 1024 // 1MB
+	case TransportWSMan:
+		// WSMan limited by MaxEnvelopeSizeKb (default 500KB)
+		// 256KB raw = ~341KB Base64, leaving room for SOAP/script overhead
+		opts.ChunkSize = 256 * 1024 // 256KB (conservative)
+	}
+
+	return opts
 }
 
 // transferProgress tracks progress for a file transfer operation.
@@ -254,8 +299,8 @@ func generatePreallocateScript(remotePath string, size int64) string {
 // Files are transferred in chunks using Base64 encoding over PowerShell remoting.
 // For large files, consider enabling compression or adjusting the chunk size.
 func (c *Client) CopyFile(ctx context.Context, localPath, remotePath string, opts ...FileTransferOption) error {
-	// Apply defaults and options
-	opt := DefaultFileTransferOptions()
+	// Apply transport-aware defaults and user options
+	opt := DefaultFileTransferOptionsForTransport(c.config.Transport)
 	for _, fn := range opts {
 		fn(&opt)
 	}
@@ -324,160 +369,167 @@ func (c *Client) CopyFile(ctx context.Context, localPath, remotePath string, opt
 		"parallel":    opt.MaxConcurrency > 1 && numChunks > 1,
 	})
 
-	// Use parallel mode if MaxConcurrency > 1 and file has multiple chunks
-	if opt.MaxConcurrency > 1 && numChunks > 1 {
-		if err := c.copyFileParallel(ctx, file, remotePath, opt, totalSize, progress); err != nil {
-			return err
-		}
-		// Security Event: Log completion
-		c.logSecurityEvent("FILE_TRANSFER_COMPLETE", map[string]interface{}{
-			"operation":   "CopyFile",
-			"destination": remotePath,
-			"bytes_sent":  totalSize,
-			"status":      "success",
-			"verified":    opt.VerifyChecksum,
-			"parallel":    true,
-		})
-		c.logInfo("CopyFile: Transfer complete (%d bytes, parallel)", totalSize)
-		return nil
+	// Use streaming mode for transfer (replaces legacy serial and parallel modes)
+	// Streaming uses a single pipeline and feeds chunks as input, avoiding pipeline creation overhead.
+	if err := c.copyFileStreaming(ctx, file, remotePath, opt, totalSize, progress); err != nil {
+		return err
 	}
 
-	// Serial mode: Step 1 - Initialize remote file (create empty file)
-	initScript := generateInitScript(remotePath)
+	return nil
+}
 
-	c.logInfo("CopyFile: Initializing remote file %s", remotePath)
-	_, err = c.Execute(ctx, initScript)
+// copyFileStreaming uploads a file using a single streaming pipeline.
+// This is more efficient than chunked uploads as it avoids per-chunk overhead (pipeline creation).
+// It streams file chunks as pipeline input to a script that writes them to the destination.
+func (c *Client) copyFileStreaming(ctx context.Context, file *os.File, remotePath string, opt FileTransferOptions, totalSize int64, progress *transferProgress) error {
+	chunkSize := int64(opt.ChunkSize)
+	numChunks := (totalSize + chunkSize - 1) / chunkSize
+
+	c.logInfo("CopyFile: Streaming upload (chunks: %d, size: %d, chunk_size: %d)", numChunks, totalSize, chunkSize)
+
+	// Prepare script that reads from input stream
+	pathB64 := base64.StdEncoding.EncodeToString([]byte(remotePath))
+	// Prepare file creation command (overwrite vs check)
+	createCmd := "$s = [System.IO.File]::Create($path)"
+	if opt.NoOverwrite {
+		// Use Open with CreateNew mode to atomically fail if file exists
+		createCmd = "$s = [System.IO.File]::Open($path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write)"
+	}
+
+	// Script: Create file, read Base64 from input, write to file
+	script := fmt.Sprintf(`
+		$ErrorActionPreference = 'Stop'
+		$path = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('%s'))
+		%s
+		$s.SetLength(%d)
+		try {
+			$input | ForEach-Object {
+				$s.Write($_, 0, $_.Length)
+			}
+		} finally {
+			$s.Close()
+		}
+	`, pathB64, createCmd, totalSize)
+
+	// Start streaming pipeline
+	sr, err := c.ExecuteStreamWithInput(ctx, script)
 	if err != nil {
-		c.logSecurityEvent("FILE_TRANSFER_FAILED", map[string]interface{}{
-			"operation": "CopyFile",
-			"phase":     "initialize",
-			"error":     err.Error(),
-		})
-		// Sanitize error (Finding 4)
-		if strings.Contains(err.Error(), "Access is denied") {
-			return fmt.Errorf("initialization failed: permission denied")
-		}
-		return fmt.Errorf("initialization failed: remote operation error")
+		return fmt.Errorf("start stream: %w", err)
 	}
 
-	// Serial mode: Step 2 - Upload chunks sequentially
-	c.logInfo("CopyFile: Uploading %d chunks (%d bytes)", numChunks, totalSize)
-
-	// Get buffer from pool
-	bufPtr := bufferPool.Get().(*[]byte)
-	defer bufferPool.Put(bufPtr)
-	buf := (*bufPtr)[:opt.ChunkSize]
-
-	// Initialize Hasher if verification is enabled
+	// Prepare hasher if verification enabled
 	var hasher hash.Hash
 	if opt.VerifyChecksum {
 		hasher = sha256.New()
 	}
 
-	for i := int64(0); i < numChunks; i++ {
-		// Check for context cancellation
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("transfer cancelled: %w", ctx.Err())
-		default:
+	// Send chunks in background or current goroutine?
+	// Sending blocks on flow control, so we should do it here, but need to monitor output/errors?
+	// StreamResult channels are buffered. If script fails, it might send error output.
+	// But ExecuteStreamWithInput is non-blocking start.
+	// We can loop send here.
+
+	// Use a function to handle sending so we can defer CloseInput
+	sendErr := func() error {
+		defer sr.CloseInput(ctx)
+
+		buf := make([]byte, chunkSize)
+		for i := int64(0); i < numChunks; i++ {
+			// Check context
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+
+			n, err := file.Read(buf)
+			if err != nil && err != io.EOF {
+				return fmt.Errorf("read chunk %d: %w", i, err)
+			}
+			if n == 0 {
+				break
+			}
+
+			chunk := buf[:n]
+
+			// Hash (before encoding)
+			if opt.VerifyChecksum {
+				hasher.Write(chunk)
+			}
+
+			// Send raw bytes to pipeline (efficiently serialized as <BA>)
+			if err := sr.SendInput(ctx, chunk); err != nil {
+				return fmt.Errorf("send chunk %d: %w", i, err)
+			}
+
+			// Update progress
+			if progress != nil {
+				progress.update(int64(n))
+			}
+
+			// Log occasionally
+			if (i+1)%10 == 0 || i == numChunks-1 {
+				c.logInfo("CopyFile: Streamed chunk %d/%d", i+1, numChunks)
+			}
 		}
+		return nil
+	}()
 
-		// Read chunk
-		n, readErr := file.Read(buf)
-		if readErr != nil && readErr != io.EOF {
-			return fmt.Errorf("failed to read chunk %d: %w", i, readErr)
-		}
-		if n == 0 {
-			break // End of file
-		}
-
-		chunk := buf[:n]
-
-		// Update hash if verification is enabled
-		if hasher != nil {
-			hasher.Write(chunk)
-		}
-
-		// Encode to Base64
-		b64 := base64.StdEncoding.EncodeToString(chunk)
-
-		// Validate Base64 size (defense in depth)
-		if len(b64) > maxChunkBase64Size {
-			return fmt.Errorf("chunk %d too large after encoding: %d bytes", i, len(b64))
-		}
-
-		// Append chunk to remote file
-		appendScript := generateAppendScript(remotePath, b64)
-
-		_, err = c.Execute(ctx, appendScript)
-		if err != nil {
-			c.logSecurityEvent("FILE_TRANSFER_FAILED", map[string]interface{}{
-				"operation": "CopyFile",
-				"phase":     "upload_chunk",
-				"chunk":     i,
-				"error":     err.Error(),
-			})
-			return fmt.Errorf("failed to upload chunk %d/%d: remote operation error", i+1, numChunks)
-		}
-
-		// Update progress
-		if progress != nil {
-			progress.update(int64(n))
-		}
-
-		// Log progress every 10 chunks (only if logging is enabled)
-		if (i+1)%10 == 0 || i == numChunks-1 {
-			c.logInfo("CopyFile: Uploaded chunk %d/%d", i+1, numChunks)
-		}
+	// Wait for pipeline to complete (catches script errors)
+	// If send failed, we might want to Cancel?
+	if sendErr != nil {
+		c.logError("CopyFile: Send failed, canceling pipeline: %v", sendErr)
+		sr.Cancel()
 	}
 
-	// Step 3: Verify Checksum (if enabled)
+	// Wait for script completion
+	waitErr := sr.Wait()
+
+	if sendErr != nil {
+		// If send failed because pipeline failed, prefer the pipeline error (waitErr)
+		// because it contains the actual script exception (e.g. "File exists")
+		if waitErr != nil && strings.Contains(sendErr.Error(), "invalid pipeline state") {
+			return fmt.Errorf("transfer failed: %w", waitErr)
+		}
+		return sendErr
+	}
+	if waitErr != nil {
+		c.logSecurityEvent("FILE_TRANSFER_FAILED", map[string]interface{}{
+			"operation": "CopyFile",
+			"phase":     "stream_wait",
+			"error":     waitErr.Error(),
+		})
+		return fmt.Errorf("stream execution failed: %w", waitErr)
+	}
+
+	// Verify Checksum if enabled
 	if opt.VerifyChecksum {
 		c.logInfo("CopyFile: Verifying checksum...")
 		localHash := hex.EncodeToString(hasher.Sum(nil))
 
-		// Check remote hash using Get-FileHash
-		// Re-encode path for verification script
-		remotePathB64ForVerify := base64.StdEncoding.EncodeToString([]byte(remotePath))
-
 		verifyScript := fmt.Sprintf(`
 			$ErrorActionPreference = 'Stop'
-			try {
-				$pathBytes = [System.Convert]::FromBase64String('%s')
-				$path = [System.Text.Encoding]::UTF8.GetString($pathBytes)
-				(Get-FileHash -Algorithm SHA256 -Path $path).Hash
-			} catch {
-				Write-Error "Failed to verify checksum: $_"
-				exit 1
-			}
-		`, remotePathB64ForVerify)
+			$path = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('%s'))
+			(Get-FileHash -Algorithm SHA256 -Path $path).Hash
+		`, pathB64)
 
-		result, err := c.Execute(ctx, verifyScript)
+		res, err := c.Execute(ctx, verifyScript)
 		if err != nil {
-			c.logSecurityEvent("FILE_TRANSFER_FAILED", map[string]interface{}{
-				"operation": "CopyFile",
-				"phase":     "verify_checksum",
-				"error":     err.Error(),
-			})
-			return fmt.Errorf("failed to verify checksum: remote operation error")
+			return fmt.Errorf("verify checksum execution failed: %w", err)
 		}
 
-		var output string
-		if result != nil && len(result.Output) > 0 {
-			// output from c.Execute result.Output is []interface{}
-			// Handle various return types from PowerShell serialization
-			if s, ok := result.Output[0].(string); ok {
-				output = s
-			} else if psObj, ok := result.Output[0].(*serialization.PSObject); ok {
-				output = psObj.ToString
+		var remoteHash string
+		if res != nil && len(res.Output) > 0 {
+			if s, ok := res.Output[0].(string); ok {
+				remoteHash = strings.TrimSpace(s)
+			} else if psObj, ok := res.Output[0].(*serialization.PSObject); ok {
+				remoteHash = strings.TrimSpace(psObj.ToString)
 			} else {
-				// Fallback generic string conversion for safety
-				output = fmt.Sprintf("%v", result.Output[0])
+				remoteHash = fmt.Sprintf("%v", res.Output[0])
 			}
 		}
 
-		remoteHash := strings.TrimSpace(output)
-		if !strings.EqualFold(remoteHash, localHash) {
+		if !strings.EqualFold(localHash, remoteHash) {
 			c.logSecurityEvent("FILE_TRANSFER_FAILED", map[string]interface{}{
 				"operation":   "CopyFile",
 				"phase":       "checksum_mismatch",
@@ -486,7 +538,6 @@ func (c *Client) CopyFile(ctx context.Context, localPath, remotePath string, opt
 			})
 			return fmt.Errorf("checksum mismatch! local: %s, remote: %s", localHash, remoteHash)
 		}
-
 		c.logInfo("CopyFile: Checksum verified (SHA256: %s)", localHash)
 	}
 
@@ -497,9 +548,10 @@ func (c *Client) CopyFile(ctx context.Context, localPath, remotePath string, opt
 		"bytes_sent":  totalSize,
 		"status":      "success",
 		"verified":    opt.VerifyChecksum,
+		"mode":        "streaming",
 	})
+	c.logInfo("CopyFile: Transfer complete (%d bytes, streaming)", totalSize)
 
-	c.logInfo("CopyFile: Transfer complete (%d bytes)", totalSize)
 	return nil
 }
 
@@ -590,7 +642,17 @@ func (c *Client) copyFileParallel(ctx context.Context, file *os.File, remotePath
 
 			// Write chunk at specific offset
 			script := generateOffsetWriteScript(remotePath, offset, b64)
-			_, execErr := c.Execute(gctx, script)
+
+			// Use per-chunk timeout - each chunk gets its own deadline
+			// This allows large transfers to complete as long as chunks keep succeeding
+			chunkTimeout := opt.ChunkTimeout
+			if chunkTimeout == 0 {
+				chunkTimeout = 60 * time.Second
+			}
+			chunkCtx, chunkCancel := context.WithTimeout(gctx, chunkTimeout)
+			_, execErr := c.Execute(chunkCtx, script)
+			chunkCancel() // Clean up immediately
+
 			if execErr != nil {
 				c.logSecurityEvent("FILE_TRANSFER_FAILED", map[string]interface{}{
 					"operation": "CopyFile",
@@ -684,8 +746,8 @@ func (c *Client) copyFileParallel(ctx context.Context, file *os.File, remotePath
 // Files are transferred in chunks using Base64 encoding over PowerShell remoting.
 // For large files, consider enabling compression or adjusting the chunk size.
 func (c *Client) FetchFile(ctx context.Context, remotePath, localPath string, opts ...FileTransferOption) error {
-	// Apply defaults and options
-	opt := DefaultFileTransferOptions()
+	// Apply transport-aware defaults and user options
+	opt := DefaultFileTransferOptionsForTransport(c.config.Transport)
 	for _, fn := range opts {
 		fn(&opt)
 	}
