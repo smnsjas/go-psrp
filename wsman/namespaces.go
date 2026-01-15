@@ -82,16 +82,25 @@ const (
 	ActionSignalResponse = "http://schemas.microsoft.com/wbem/wsman/1/windows/shell/SignalResponse"
 )
 
-// Signal codes for the Signal action.
-const (
-	// SignalTerminate terminates a command.
-	SignalTerminate = "http://schemas.microsoft.com/wbem/wsman/1/windows/shell/signal/terminate"
-)
-
 // Resource URIs for PowerShell remoting.
 const (
 	// ResourceURIPowerShell is the resource URI for PowerShell remoting sessions.
 	ResourceURIPowerShell = "http://schemas.microsoft.com/powershell/Microsoft.PowerShell"
+
+	// ResourceURIWinRS is the resource URI for Windows Remote Shell (cmd.exe) sessions.
+	ResourceURIWinRS = "http://schemas.microsoft.com/wbem/wsman/1/windows/shell/cmd"
+)
+
+// Signal codes for the Signal action.
+const (
+	// SignalTerminate terminates a command.
+	SignalTerminate = "http://schemas.microsoft.com/wbem/wsman/1/windows/shell/signal/terminate"
+
+	// SignalCtrlC sends Ctrl+C to a command.
+	SignalCtrlC = "http://schemas.microsoft.com/wbem/wsman/1/windows/shell/signal/ctrl_c"
+
+	// SignalCtrlBreak sends Ctrl+Break to a command.
+	SignalCtrlBreak = "http://schemas.microsoft.com/wbem/wsman/1/windows/shell/signal/ctrl_break"
 )
 
 // WSMan Action URIs for Enumeration.

@@ -141,6 +141,8 @@ func (c *Client) Create(ctx context.Context, options map[string]string, creation
 }
 
 // Command creates a new command (Pipeline) in the shell and returns the command ID.
+// For PSRP: commandID is a GUID, arguments is empty (PSRP doesn't use them).
+// For WinRS: commandID is the executable, arguments are the command-line args.
 func (c *Client) Command(ctx context.Context, epr *EndpointReference, commandID, arguments string) (string, error) {
 	env := NewEnvelope().
 		WithAction(ActionCommand).
@@ -160,25 +162,43 @@ func (c *Client) Command(ctx context.Context, epr *EndpointReference, commandID,
 		env.WithSelector(s.Name, s.Value)
 	}
 
-	// Build CommandLine with optional CommandId attribute
+	// Build CommandLine - format differs between PSRP and WinRS
 	var commandLine []byte
-	if commandID != "" {
-		commandLine = []byte(`<rsp:CommandLine CommandId="` + commandID + `" xmlns:rsp="` + NsShell + `">
-  <rsp:Command></rsp:Command>
+	isWinRS := epr.ResourceURI == ResourceURIWinRS
+
+	if isWinRS {
+		// WinRS: commandID = executable, arguments = cmd args
+		// Generate a new GUID for the command ID
+		cmdGUID := strings.ToUpper(uuid.New().String())
+		commandLine = []byte(`<rsp:CommandLine CommandId="` + cmdGUID + `" xmlns:rsp="` + NsShell + `">
+  <rsp:Command>` + commandID + `</rsp:Command>
 `)
+		if arguments != "" {
+			commandLine = append(commandLine, []byte(`  <rsp:Arguments>`+arguments+`</rsp:Arguments>
+`)...)
+		}
+		commandLine = append(commandLine, []byte(`</rsp:CommandLine>
+`)...)
 	} else {
-		commandLine = []byte(`<rsp:CommandLine xmlns:rsp="` + NsShell + `">
+		// PSRP: commandID = GUID (or empty), arguments = PSRP-encoded args
+		if commandID != "" {
+			commandLine = []byte(`<rsp:CommandLine CommandId="` + commandID + `" xmlns:rsp="` + NsShell + `">
   <rsp:Command></rsp:Command>
 `)
-	}
+		} else {
+			commandLine = []byte(`<rsp:CommandLine xmlns:rsp="` + NsShell + `">
+  <rsp:Command></rsp:Command>
+`)
+		}
 
-	if arguments != "" {
-		commandLine = append(commandLine, []byte(`  <rsp:Arguments>`+arguments+`</rsp:Arguments>
+		if arguments != "" {
+			commandLine = append(commandLine, []byte(`  <rsp:Arguments>`+arguments+`</rsp:Arguments>
+`)...)
+		}
+
+		commandLine = append(commandLine, []byte(`</rsp:CommandLine>
 `)...)
 	}
-
-	commandLine = append(commandLine, []byte(`</rsp:CommandLine>
-`)...)
 
 	env.WithBody(commandLine)
 
