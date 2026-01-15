@@ -1240,25 +1240,10 @@ func (c *Client) connectInternal(ctx context.Context) error {
 		c.psrpPool.InitializeAvailabilityIfNeeded()
 	}
 
-	// 4. Drain Shell Output (RunspacePoolState) to ensure pool is ready
-	// This is critical: if we don't consume the initial Opened state,
-	// subsequent pipeline execution might stall or timeout.
-	// We use a short timeout for this initial drain
-	drainCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	// Perform one Receive on the Shell (empty command ID)
-	// Drain result is discarded - we just need to consume the state message
-	// Note: We need the ShellID from the backend
-	// TODO: Add ShellID() to RunspaceBackend interface? Yes, we did.
-	if wsmanBackend, ok := c.backend.(*powershell.WSManBackend); ok {
-		c.logInfoLocked("Draining initial receive...")
-		if epr := wsmanBackend.EPR(); epr != nil {
-			c.logfLocked("Performing receive on shell EPR...")
-			_, _ = c.wsman.Receive(drainCtx, epr, "")
-			c.logfLocked("Shell receive completed/timed out")
-		}
-	}
+	// Note: The pool now properly waits for server handshake response
+	// (SESSION_CAPABILITY + RUNSPACEPOOL_STATE) during Open(), so we no longer
+	// need to drain here. The old drain logic caused HTTP 500 errors because
+	// the messages were already consumed by the pool.
 
 	// Wait for at least 1 runspace to be available before declaring "Connected"
 	// This ensures Health() returns Healthy immediately after Connect().
