@@ -85,6 +85,8 @@ func NewHTTPTransport(opts ...HTTPTransportOption) *HTTPTransport {
 				},
 				// NTLM requires persistent connections for the handshake
 				DisableKeepAlives: false,
+				// Disable HTTP/2 - SPNEGO/Kerberos auth can have issues with HTTP/2 multiplexing
+				ForceAttemptHTTP2: false,
 				// Increase connection limits for concurrent command execution
 				// Each concurrent command needs its own connection for NTLM auth
 				// Default: 10 connections to support MaxConcurrentCommands=5 with headroom

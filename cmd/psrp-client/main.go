@@ -76,6 +76,7 @@ func main() {
 	realm := flag.String("realm", "", "Kerberos realm (e.g., EXAMPLE.COM)")
 	krb5Conf := flag.String("krb5conf", "", "Path to krb5.conf file")
 	ccache := flag.String("ccache", "", "Path to Kerberos credential cache (e.g. /tmp/krb5cc_1000)")
+	spn := flag.String("spn", "", "Service Principal Name for Kerberos (e.g., HTTP/server.domain.com)")
 
 	// HvSocket (PowerShell Direct) flags
 	useHvSocket := flag.Bool("hvsocket", false, "Use Hyper-V Socket (PowerShell Direct) transport")
@@ -303,6 +304,7 @@ func main() {
 	if cfg.Krb5ConfPath == "" {
 		cfg.Krb5ConfPath = os.Getenv("KRB5_CONFIG")
 	}
+	cfg.TargetSPN = *spn
 
 	// Override auth type if explicit flag set
 	if *useKerberos {

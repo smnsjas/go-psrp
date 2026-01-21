@@ -189,6 +189,10 @@ type Config struct {
 	// CCachePath is the path to the credential cache (optional).
 	CCachePath string
 
+	// TargetSPN is the Kerberos Service Principal Name (e.g., "HTTP/server.domain.com").
+	// If empty, defaults to "HTTP/<hostname>".
+	TargetSPN string
+
 	// Transport specifies the transport mechanism (WSMan or HvSocket).
 	Transport TransportType
 
@@ -935,7 +939,11 @@ func New(hostname string, cfg Config) (*Client, error) {
 	switch cfg.AuthType {
 	case AuthNegotiate:
 		// Try Kerberos first, fall back to NTLM if Kerberos unavailable
-		targetSPN := fmt.Sprintf("HTTP/%s", hostname)
+		targetSPN := cfg.TargetSPN
+		if targetSPN == "" {
+			// WinRM uses WSMAN/ SPN, not HTTP/
+			targetSPN = fmt.Sprintf("WSMAN/%s", hostname)
+		}
 		krbCfg := auth.KerberosProviderConfig{
 			TargetSPN:    targetSPN,
 			Realm:        cfg.Realm,
@@ -958,7 +966,11 @@ func New(hostname string, cfg Config) (*Client, error) {
 		authenticator = auth.NewNTLMAuth(creds, auth.WithCBT(cfg.EnableCBT))
 	case AuthKerberos:
 		// Kerberos only - no fallback
-		targetSPN := fmt.Sprintf("HTTP/%s", hostname)
+		targetSPN := cfg.TargetSPN
+		if targetSPN == "" {
+			// WinRM uses WSMAN/ SPN, not HTTP/
+			targetSPN = fmt.Sprintf("WSMAN/%s", hostname)
+		}
 		krbCfg := auth.KerberosProviderConfig{
 			TargetSPN:    targetSPN,
 			Realm:        cfg.Realm,
