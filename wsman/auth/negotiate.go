@@ -2,10 +2,17 @@ package auth
 
 import (
 	"bytes"
+	"context"
+	"crypto/sha256"
+	"crypto/sha512"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"fmt"
+	"hash"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"strings"
 )
 
@@ -43,6 +50,35 @@ type negotiateRoundTripper struct {
 	provider SecurityProvider
 }
 
+// contextKey is a context key type.
+type contextKey string
+
+// ContextKeyChannelBindings is the context key for Channel Binding Token (CBT) data.
+const ContextKeyChannelBindings = contextKey("ChannelBindings")
+
+func getCBTHash(state *tls.ConnectionState) []byte {
+	if len(state.PeerCertificates) == 0 {
+		return nil
+	}
+	cert := state.PeerCertificates[0]
+	// Use hash algorithm based on certificate signature algorithm per RFC 5929
+	var h hash.Hash
+	switch cert.SignatureAlgorithm {
+	case x509.SHA256WithRSA, x509.ECDSAWithSHA256, x509.SHA256WithRSAPSS:
+		h = sha256.New()
+	case x509.SHA384WithRSA, x509.ECDSAWithSHA384, x509.SHA384WithRSAPSS:
+		h = sha512.New384()
+	case x509.SHA512WithRSA, x509.ECDSAWithSHA512, x509.SHA512WithRSAPSS:
+		h = sha512.New()
+	default:
+		// Default to SHA256 for older algos (MD5, SHA1) or unknown
+		h = sha256.New()
+	}
+
+	h.Write(cert.Raw)
+	return h.Sum(nil)
+}
+
 func (rt *negotiateRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	// Buffer the request body upfront so we can retry
 	var bodyBytes []byte
@@ -63,11 +99,37 @@ func (rt *negotiateRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 	var resp *http.Response
 	var serverToken []byte
 	var clientToken []byte
+	var cbtData []byte
+
+	// Capture TLS connection state
+	trace := &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			if info.Conn != nil {
+				if tlsConn, ok := info.Conn.(*tls.Conn); ok {
+					state := tlsConn.ConnectionState()
+					cbtData = getCBTHash(&state)
+				}
+			} else if info.Conn == nil {
+				fmt.Printf("WARN: GotConn info.Conn is nil\n")
+			}
+		},
+	}
+	ctx := httptrace.WithClientTrace(req.Context(), trace)
+
+	// Traditional challenge-response flow:
+	// 1. First request without token
+	// 2. Get 401 + Negotiate challenge
+	// 3. Generate token and send
+	// 4. Get 200 (or mutual auth response)
 
 	// Bounded retry loop for multi-leg SPNEGO (supports NTLM which needs 3 legs)
 	for attempt := 0; attempt < maxNegotiateRetries; attempt++ {
-		// Clone request to avoid data races
-		reqClone := req.Clone(req.Context())
+		// Clone request to avoid data races and inject CBT data if available
+		reqCtx := ctx
+		if len(cbtData) > 0 {
+			reqCtx = context.WithValue(reqCtx, ContextKeyChannelBindings, cbtData)
+		}
+		reqClone := req.Clone(reqCtx)
 		if bodyBytes != nil {
 			reqClone.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 			reqClone.ContentLength = int64(len(bodyBytes))
@@ -75,8 +137,11 @@ func (rt *negotiateRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 
 		// Add auth header if we have a token from provider
 		if clientToken != nil {
-			reqClone.Header.Set("Authorization",
-				fmt.Sprintf("Negotiate %s", base64.StdEncoding.EncodeToString(clientToken)))
+			authHeaderValue := fmt.Sprintf("Negotiate %s", base64.StdEncoding.EncodeToString(clientToken))
+			fmt.Printf("DEBUG: Sending Authorization header length=%d, token_b64_len=%d\n",
+				len(authHeaderValue), len(base64.StdEncoding.EncodeToString(clientToken)))
+			fmt.Printf("DEBUG: Authorization header (first 200 chars): %.200s\n", authHeaderValue)
+			reqClone.Header.Set("Authorization", authHeaderValue)
 		}
 
 		// Execute request
@@ -109,9 +174,20 @@ func (rt *negotiateRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 			// Decode errors ignored: server may just send "Negotiate" without token
 		}
 
+		// If we already sent a token and server returns bare "Negotiate", auth was rejected
+		if attempt > 0 && serverToken == nil {
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("negotiate authentication rejected: server returned 401 with bare Negotiate after receiving our token (possible SPN mismatch or server doesn't accept Kerberos)")
+		}
+
 		// Generate our response token
 		var continueNeeded bool
-		clientToken, continueNeeded, err = rt.provider.Step(req.Context(), serverToken)
+		// Context for Step needs to contain the CBT data we captured
+		stepCtx := req.Context()
+		if len(cbtData) > 0 {
+			stepCtx = context.WithValue(stepCtx, ContextKeyChannelBindings, cbtData)
+		}
+		clientToken, continueNeeded, err = rt.provider.Step(stepCtx, serverToken)
 		if err != nil {
 			_ = resp.Body.Close()
 			return nil, fmt.Errorf("negotiate step failed: %w", err)
