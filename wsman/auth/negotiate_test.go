@@ -199,7 +199,7 @@ func TestNegotiateRoundTrip_MaxRetries(t *testing.T) {
 		RoundTripFunc: func(req *http.Request) (*http.Response, error) {
 			return &http.Response{
 				StatusCode: 401,
-				Header:     http.Header{"Www-Authenticate": []string{"Negotiate token"}},
+				Header:     http.Header{"Www-Authenticate": []string{"Negotiate dG9rZW4="}},
 				Body:       io.NopCloser(strings.NewReader("")),
 			}, nil
 		},
