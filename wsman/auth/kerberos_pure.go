@@ -110,7 +110,6 @@ func (p *PureKerberosProvider) Step(_ context.Context, inputToken []byte) ([]byt
 	// BUT, if we receive a token (server challenge), we need to process it.
 
 	var token []byte
-	var err error
 
 	if len(inputToken) == 0 {
 		// Initial Token Generation
@@ -147,10 +146,6 @@ func (p *PureKerberosProvider) Step(_ context.Context, inputToken []byte) ([]byt
 		// We cannot validate it with gokrb5's current API, so we accept it.
 		// TODO: Implement mutual auth validation when gokrb5 supports it.
 		return nil, false, nil
-	}
-
-	if err != nil {
-		return nil, false, err
 	}
 
 	// If we generated a token, we usually expect the server to accept it.
