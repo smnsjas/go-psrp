@@ -54,7 +54,9 @@ adding transport layers, making it ready for production PowerShell remoting.
   - Basic, NTLM (explicit credentials)
     - Supports **Extended Protection (Channel Binding Tokens)** for NTLM
   - Kerberos (pure Go via gokrb5, cross-platform)
+    - Supports **Channel Binding Tokens (CBT)** for HTTPS (hardened security)
   - Windows SSPI (native Negotiate/Kerberos on Windows)
+    - Supports both **NTLM** and **Kerberos** with CBT via SSPI
 - **Full PSRP Support** - RunspacePools, Pipelines, Output streams
 - **Resilient** - Built-in keepalive support (transport-aware) and
   configurable idle timeouts
