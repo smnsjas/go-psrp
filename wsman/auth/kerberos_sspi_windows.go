@@ -6,6 +6,7 @@ package auth
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"syscall"
 	"unsafe"
@@ -76,57 +77,30 @@ func (p *SSPIProvider) Step(ctx context.Context, serverToken []byte) ([]byte, bo
 		return nil, true, nil
 	}
 
-	fmt.Printf("DEBUG: Step called. serverToken len=%d\n", len(serverToken))
+	slog.Debug("SSPI Step called", "serverTokenLen", len(serverToken))
 
 	// First call: Acquire credentials and create context
 	if p.cred == nil {
-		var err error
-
-		// Acquire credentials using NEGOSSP_NAME for SPNEGO
-		if p.username == "" {
-			// Use current user (SSO)
-			fmt.Printf("DEBUG: Acquiring current user credentials (SSO)\n")
-			p.cred, err = sspi.AcquireCredentials("", sspi.NEGOSSP_NAME, sspi.SECPKG_CRED_OUTBOUND, nil)
-		} else {
-			// Build auth identity for explicit credentials
-			fmt.Printf("DEBUG: Acquiring user credentials for %s\\%s\n", p.domain, p.username)
-			identity, err2 := buildAuthIdentity(p.domain, p.username, p.password)
-			if err2 != nil {
-				return nil, false, fmt.Errorf("build auth identity: %w", err2)
-			}
-			p.cred, err = sspi.AcquireCredentials("", sspi.NEGOSSP_NAME, sspi.SECPKG_CRED_OUTBOUND, identity)
+		if err := p.initializeCredentials(); err != nil {
+			return nil, false, err
 		}
-		if err != nil {
-			return nil, false, fmt.Errorf("SSPI acquire credentials: %w", err)
-		}
-
-		// Create client context with standard flags
-		flags := sspi.ISC_REQ_CONNECTION |
-			sspi.ISC_REQ_MUTUAL_AUTH |
-			sspi.ISC_REQ_DELEGATE |
-			sspi.ISC_REQ_INTEGRITY |
-			sspi.ISC_REQ_CONFIDENTIALITY |
-			sspi.ISC_REQ_REPLAY_DETECT |
-			sspi.ISC_REQ_SEQUENCE_DETECT
-
-		p.ctx = sspi.NewClientContext(p.cred, uint32(flags))
 
 		// Convert target name to UTF-16
 		tname, err := syscall.UTF16PtrFromString(p.targetSPN)
 		if err != nil {
-			return nil, false, fmt.Errorf("convert SPN: %w", err)
+			return nil, false, fmt.Errorf("convert SPN to UTF-16: %w", err)
 		}
 		p.targetName = tname
 
 		// Store CBT from context for reuse
 		if cbtHash, ok := ctx.Value(ContextKeyChannelBindings).([]byte); ok && len(cbtHash) > 0 {
 			p.channelBindings = makeChannelBindings(cbtHash)
-			fmt.Printf("DEBUG: SSPI Negotiate with CBT. HashLen=%d, StructLen=%d\n", len(cbtHash), len(p.channelBindings))
+			slog.Debug("SSPI Negotiate with CBT", "hashLen", len(cbtHash), "structLen", len(p.channelBindings))
 		} else {
-			fmt.Printf("DEBUG: SSPI Negotiate without CBT\n")
+			slog.Debug("SSPI Negotiate without CBT")
 		}
 
-		fmt.Printf("DEBUG: SSPI TargetSPN: %s\n", p.targetSPN)
+		slog.Debug("SSPI configuration", "targetSPN", p.targetSPN)
 	}
 
 	// Call UpdateContextWithChannelBindings
@@ -137,6 +111,41 @@ func (p *SSPIProvider) Step(ctx context.Context, serverToken []byte) ([]byte, bo
 
 	p.complete = authCompleted
 	return outputToken, authCompleted, nil
+}
+
+// initializeCredentials acquires SSPI credentials and creates the client context.
+func (p *SSPIProvider) initializeCredentials() error {
+	var err error
+
+	// Acquire credentials using NEGOSSP_NAME for SPNEGO
+	if p.username == "" {
+		// Use current user (SSO)
+		slog.Debug("Acquiring current user credentials (SSO)")
+		p.cred, err = sspi.AcquireCredentials("", sspi.NEGOSSP_NAME, sspi.SECPKG_CRED_OUTBOUND, nil)
+	} else {
+		// Build auth identity for explicit credentials
+		slog.Debug("Acquiring user credentials", "domain", p.domain, "username", p.username)
+		identity, identityErr := buildAuthIdentity(p.domain, p.username, p.password)
+		if identityErr != nil {
+			return fmt.Errorf("build auth identity: %w", identityErr)
+		}
+		p.cred, err = sspi.AcquireCredentials("", sspi.NEGOSSP_NAME, sspi.SECPKG_CRED_OUTBOUND, identity)
+	}
+	if err != nil {
+		return fmt.Errorf("acquire SSPI credentials: %w", err)
+	}
+
+	// Create client context with standard flags
+	flags := sspi.ISC_REQ_CONNECTION |
+		sspi.ISC_REQ_MUTUAL_AUTH |
+		sspi.ISC_REQ_DELEGATE |
+		sspi.ISC_REQ_INTEGRITY |
+		sspi.ISC_REQ_CONFIDENTIALITY |
+		sspi.ISC_REQ_REPLAY_DETECT |
+		sspi.ISC_REQ_SEQUENCE_DETECT
+
+	p.ctx = sspi.NewClientContext(p.cred, uint32(flags))
+	return nil
 }
 
 // updateContextWithChannelBindings performs SSPI context update with optional channel bindings.
@@ -172,10 +181,7 @@ func (p *SSPIProvider) updateContextWithChannelBindings(serverToken []byte) ([]b
 	ret := p.ctx.Update(p.targetName, outBufs, inBufs)
 	n := int(outBuf[0].BufferSize)
 
-	fmt.Printf("DEBUG: SSPI result=0x%x, tokenLen=%d\n", uint32(ret), n)
-	if n > 4 {
-		fmt.Printf("DEBUG: Token prefix: %x\n", dst[:4])
-	}
+	slog.Debug("SSPI Update result", "returnCode", fmt.Sprintf("0x%x", uint32(ret)), "tokenLen", n)
 
 	switch ret {
 	case sspi.SEC_E_OK:
@@ -185,14 +191,14 @@ func (p *SSPIProvider) updateContextWithChannelBindings(serverToken []byte) ([]b
 	case sspi.SEC_I_COMPLETE_NEEDED, sspi.SEC_I_COMPLETE_AND_CONTINUE:
 		completeRet := sspi.CompleteAuthToken(p.ctx.Handle, outBufs)
 		if completeRet != sspi.SEC_E_OK {
-			return nil, false, fmt.Errorf("SSPI complete auth: 0x%x", completeRet)
+			return nil, false, fmt.Errorf("complete auth token: SSPI error 0x%x", uint32(completeRet))
 		}
 		if ret == sspi.SEC_I_COMPLETE_AND_CONTINUE {
 			return dst[:n], false, nil
 		}
 		return dst[:n], true, nil
 	default:
-		return nil, false, fmt.Errorf("SSPI error: 0x%x", uint32(ret))
+		return nil, false, fmt.Errorf("SSPI InitializeSecurityContext: error 0x%x", uint32(ret))
 	}
 }
 
@@ -202,13 +208,13 @@ func (p *SSPIProvider) Close() error {
 
 	if p.ctx != nil {
 		if err := p.ctx.Release(); err != nil {
-			errs = append(errs, fmt.Sprintf("ctx release: %v", err))
+			errs = append(errs, fmt.Sprintf("context release: %v", err))
 		}
 		p.ctx = nil
 	}
 	if p.cred != nil {
 		if err := p.cred.Release(); err != nil {
-			errs = append(errs, fmt.Sprintf("cred release: %v", err))
+			errs = append(errs, fmt.Sprintf("credentials release: %v", err))
 		}
 		p.cred = nil
 	}
@@ -219,19 +225,19 @@ func (p *SSPIProvider) Close() error {
 	return nil
 }
 
-// buildAuthIdentity creates a SEC_WINNT_AUTH_IDENTITY structure.
+// buildAuthIdentity creates a SEC_WINNT_AUTH_IDENTITY structure for explicit credentials.
 func buildAuthIdentity(domain, username, password string) (*byte, error) {
 	d, err := syscall.UTF16FromString(domain)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("encode domain to UTF-16: %w", err)
 	}
 	u, err := syscall.UTF16FromString(username)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("encode username to UTF-16: %w", err)
 	}
 	pw, err := syscall.UTF16FromString(password)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("encode password to UTF-16: %w", err)
 	}
 	identity := &sspi.SEC_WINNT_AUTH_IDENTITY{
 		User:           &u[0],

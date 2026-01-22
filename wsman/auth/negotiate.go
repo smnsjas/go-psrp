@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptrace"
 	"strings"
@@ -138,9 +139,7 @@ func (rt *negotiateRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 		// Add auth header if we have a token from provider
 		if clientToken != nil {
 			authHeaderValue := fmt.Sprintf("Negotiate %s", base64.StdEncoding.EncodeToString(clientToken))
-			fmt.Printf("DEBUG: Sending Authorization header length=%d, token_b64_len=%d\n",
-				len(authHeaderValue), len(base64.StdEncoding.EncodeToString(clientToken)))
-			fmt.Printf("DEBUG: Authorization header (first 200 chars): %.200s\n", authHeaderValue)
+			slog.Debug("Sending Authorization header", "length", len(authHeaderValue), "tokenB64Len", len(base64.StdEncoding.EncodeToString(clientToken)))
 			reqClone.Header.Set("Authorization", authHeaderValue)
 		}
 
