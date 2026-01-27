@@ -22,6 +22,14 @@ func (m *MockSecurityProvider) Step(ctx context.Context, serverToken []byte) (cl
 	return nil, false, nil
 }
 
+func (m *MockSecurityProvider) Wrap(data []byte) ([]byte, error) {
+	return data, nil // Pass-through for tests
+}
+
+func (m *MockSecurityProvider) Unwrap(data []byte) ([]byte, error) {
+	return data, nil // Pass-through for tests
+}
+
 func (m *MockSecurityProvider) Close() error {
 	return nil
 }

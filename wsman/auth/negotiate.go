@@ -81,6 +81,10 @@ func getCBTHash(state *tls.ConnectionState) []byte {
 }
 
 func (rt *negotiateRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Check if this is an HTTP (not HTTPS) request with an already-established auth context
+	isHTTP := req.URL.Scheme == "http"
+	authComplete := rt.provider.Complete()
+
 	// Buffer the request body upfront so we can retry
 	var bodyBytes []byte
 	if req.Body != nil && req.ContentLength > 0 {
@@ -90,6 +94,54 @@ func (rt *negotiateRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 		if err != nil {
 			return nil, fmt.Errorf("read request body: %w", err)
 		}
+	}
+
+	// For HTTP with established auth, encrypt the body BEFORE sending
+	if isHTTP && authComplete && len(bodyBytes) > 0 {
+		slog.Debug("Negotiate: Encrypting HTTP request body", "plainLen", len(bodyBytes))
+		encrypted, err := rt.provider.Wrap(bodyBytes)
+		if err != nil {
+			return nil, fmt.Errorf("encrypt request body: %w", err)
+		}
+		slog.Debug("Negotiate: Encrypted HTTP request body", "encryptedLen", len(encrypted))
+
+		// Replace body with encrypted version
+		req.Body = io.NopCloser(bytes.NewReader(encrypted))
+		req.ContentLength = int64(len(encrypted))
+		req.GetBody = func() (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader(encrypted)), nil
+		}
+
+		// Send the encrypted request directly (skip auth loop)
+		resp, err := rt.base.RoundTrip(req)
+		if err != nil {
+			return nil, err
+		}
+
+		// Decrypt the response body if present
+		if resp.Body != nil && resp.ContentLength > 0 {
+			respBody, readErr := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if readErr != nil {
+				return nil, fmt.Errorf("read encrypted response: %w", readErr)
+			}
+
+			slog.Debug("Negotiate: Decrypting HTTP response body", "encryptedLen", len(respBody))
+			decrypted, unwrapErr := rt.provider.Unwrap(respBody)
+			if unwrapErr != nil {
+				return nil, fmt.Errorf("decrypt response body: %w", unwrapErr)
+			}
+			slog.Debug("Negotiate: Decrypted HTTP response body", "plainLen", len(decrypted))
+
+			resp.Body = io.NopCloser(bytes.NewReader(decrypted))
+			resp.ContentLength = int64(len(decrypted))
+		}
+
+		return resp, nil
+	}
+
+	// Not encrypted - proceed with normal auth flow
+	if len(bodyBytes) > 0 {
 		// Reset body for initial request
 		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		req.GetBody = func() (io.ReadCloser, error) {
@@ -152,6 +204,16 @@ func (rt *negotiateRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 
 		// Success - return response
 		if resp.StatusCode != http.StatusUnauthorized {
+			// Authentication complete!
+			// For HTTP (not HTTPS), we need to encrypt the body on subsequent requests
+			isHTTP := req.URL.Scheme == "http"
+			if isHTTP && rt.provider.Complete() && bodyBytes != nil && len(bodyBytes) > 0 {
+				// Auth succeeded on HTTP - future requests need encrypted bodies
+				// But this FIRST post-auth request already sent plain body.
+				// WinRM expects encrypted body from now on.
+				// Return this response, but mark auth complete
+				slog.Debug("Negotiate: HTTP auth complete, future requests will be encrypted")
+			}
 			return resp, nil
 		}
 
