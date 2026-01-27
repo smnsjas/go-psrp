@@ -31,6 +31,16 @@ type SecurityProvider interface {
 	// Complete returns true if the security context has been successfully established.
 	Complete() bool
 
+	// Wrap encrypts/signs data for secure transmission over HTTP.
+	// This is ONLY used for HTTP transport (not HTTPS/TLS).
+	// HTTPS providers should return an error.
+	Wrap(data []byte) ([]byte, error)
+
+	// Unwrap decrypts/verifies data received from HTTP transport.
+	// This is ONLY used for HTTP transport (not HTTPS/TLS).
+	// HTTPS providers should return an error.
+	Unwrap(data []byte) ([]byte, error)
+
 	// Close releases any resources associated with the context (e.g. handles).
 	Close() error
 }
