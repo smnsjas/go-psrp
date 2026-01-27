@@ -8,8 +8,6 @@ github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/go-crypt/x v0.4.10 h1:ObD6bG6qVL9Kphu4+Lftv6i3wnMP/ro9tpS6GZzdJ0M=
 github.com/go-crypt/x v0.4.10/go.mod h1:xN4WnD2Zz84Fg0/UjfuhKCT3cZv5MujbHffNQft2cQE=
-github.com/go-krb5/krb5 v0.0.0-20251226122733-d0288459fc25 h1:rrB4LeHOb6tDQ6AngZgtVBgErzv/HhuAoHX+kMAUP5c=
-github.com/go-krb5/krb5 v0.0.0-20251226122733-d0288459fc25/go.mod h1:T7YFjMJjkPQgKxp7I/8eNiqumqXSuRi9AlMiV1TvnXs=
 github.com/go-krb5/x v0.3.0 h1:5BcaVo6WiJSz2VwzBgEQ54KkCRe2puJkuXJ2vsP81uw=
 github.com/go-krb5/x v0.3.0/go.mod h1:I5UblZq9GO93jc1dVSG2N0wb6PhPMqGfUGF23hOpzvc=
 github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
@@ -22,6 +20,8 @@ github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZb
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/smnsjas/go-ntlm-cbt v0.0.0-20260107203125-46149984fac0 h1:9XyUIT0CPPincOEhGrQ4LnhaKAC0GcizVg20W4rLSSA=
 github.com/smnsjas/go-ntlm-cbt v0.0.0-20260107203125-46149984fac0/go.mod h1:RX0oZzxPLsNlqOD4wEvFg1UNLlBbpQNJHvfs9pOLJSs=
+github.com/smnsjas/krb5 v0.0.0-20260127182130-38655442ed17 h1:N7iFa/de1ONF/Nq+v0+mFmQ+kFlbKljMIO+0q9tvCGo=
+github.com/smnsjas/krb5 v0.0.0-20260127182130-38655442ed17/go.mod h1:T7YFjMJjkPQgKxp7I/8eNiqumqXSuRi9AlMiV1TvnXs=
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
 golang.org/x/crypto v0.46.0 h1:cKRW/pmt1pKAfetfu+RCEvjvZkA9RimPbh7bhFjGVBU=

@@ -13,6 +13,7 @@ require (
 	github.com/go-krb5/krb5 v0.0.0-20251226122733-d0288459fc25
 	github.com/smnsjas/go-ntlm-cbt v0.0.0-20260107203125-46149984fac0
 	github.com/smnsjas/go-psrpcore v0.0.0-20251230192519-bf6b71a48d22
+	golang.org/x/sync v0.19.0
 	golang.org/x/term v0.38.0
 )
 
@@ -21,8 +22,9 @@ require (
 	github.com/go-krb5/x v0.3.0 // indirect
 	golang.org/x/crypto v0.46.0 // indirect
 	golang.org/x/net v0.48.0 // indirect
-	golang.org/x/sync v0.19.0 // indirect
 	golang.org/x/sys v0.39.0 // indirect
 )
 
 replace github.com/smnsjas/go-psrpcore => ../go-psrpcore
+
+replace github.com/go-krb5/krb5 => github.com/smnsjas/krb5 v0.0.0-20260127182130-38655442ed17
