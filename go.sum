@@ -20,8 +20,10 @@ github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZb
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/smnsjas/go-ntlm-cbt v0.0.0-20260107203125-46149984fac0 h1:9XyUIT0CPPincOEhGrQ4LnhaKAC0GcizVg20W4rLSSA=
 github.com/smnsjas/go-ntlm-cbt v0.0.0-20260107203125-46149984fac0/go.mod h1:RX0oZzxPLsNlqOD4wEvFg1UNLlBbpQNJHvfs9pOLJSs=
-github.com/smnsjas/go-psrpcore v0.0.0-20251230192519-bf6b71a48d22 h1:pgLCZtK2w8suetvLIxlzBdtndeFqdGuaDsPGl5tb4uM=
-github.com/smnsjas/go-psrpcore v0.0.0-20251230192519-bf6b71a48d22/go.mod h1:fe7EnMMciPxTmhGD46eG7d+Ug/zyMMsy+k2uQMvLC2U=
+github.com/smnsjas/go-psrpcore v0.0.0-20260129214526-99d2a6aff11c h1:k16ueJ39v/Lxx9tJX2CZoWX+GlS+XnYosXj/35p0P6Y=
+github.com/smnsjas/go-psrpcore v0.0.0-20260129214526-99d2a6aff11c/go.mod h1:jQD6DZ5fbdmPO1vajs/lcIzph/HHpPG/nPRkRPG6qCk=
+github.com/smnsjas/krb5 v0.0.0-20260129173902-49e50274bc95 h1:ON09Vux2sh5zka8Lz4tlpfkv9i+qpPEes6a/IXjOYHA=
+github.com/smnsjas/krb5 v0.0.0-20260129173902-49e50274bc95/go.mod h1:T7YFjMJjkPQgKxp7I/8eNiqumqXSuRi9AlMiV1TvnXs=
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
 golang.org/x/crypto v0.46.0 h1:cKRW/pmt1pKAfetfu+RCEvjvZkA9RimPbh7bhFjGVBU=
