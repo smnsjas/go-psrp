@@ -526,6 +526,12 @@ func main() {
 		for _, obj := range result.Output {
 			fmt.Println(formatObject(obj))
 		}
+		if len(result.Information) > 0 {
+			fmt.Println("Information:")
+			for _, obj := range result.Information {
+				fmt.Println(formatObject(obj))
+			}
+		}
 		if result.HadErrors {
 			fmt.Fprintln(os.Stderr, "Errors:")
 			for _, obj := range result.Errors {

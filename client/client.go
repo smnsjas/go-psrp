@@ -1976,7 +1976,7 @@ func (c *Client) ExecuteAsync(ctx context.Context, script string) (string, error
 		return "", err
 	}
 
-	return psrpPipeline.ID().String(), nil
+	return strings.ToUpper(psrpPipeline.ID().String()), nil
 }
 
 // executeAsyncHvSocket handles detached execution for HvSocket.
@@ -2432,6 +2432,9 @@ func (c *Client) RemoveDisconnectedSession(ctx context.Context, session Disconne
 // RecoverPipelineOutput retrieves buffered output from a disconnected pipeline.
 // This reconnects to the shell and receives any output that was buffered before disconnect.
 func (c *Client) RecoverPipelineOutput(ctx context.Context, shellID, commandID string) (*Result, error) {
+	// Normalize IDs to Uppercase for WinRM
+	shellID = strings.ToUpper(shellID)
+	commandID = strings.ToUpper(commandID)
 
 	// 1. Reconnect if sending new command/connecting to shell
 	// Note: If we just called ReconnectSession (which sets c.connected=true for HvSocket),
@@ -2483,11 +2486,12 @@ func (c *Client) RecoverPipelineOutput(ctx context.Context, shellID, commandID s
 	// Helper to collect results (reused from Execute logic)
 	collectResults := func(pl *pipeline.Pipeline) (*Result, error) {
 		var (
-			output    []interface{}
-			errOutput []interface{}
-			hadErrors bool
-			wg        sync.WaitGroup
-			mu        sync.Mutex
+			output     []interface{}
+			errOutput  []interface{}
+			infoOutput []interface{}
+			hadErrors  bool
+			wg         sync.WaitGroup
+			mu         sync.Mutex
 		)
 
 		drainChannel := func(ch <-chan *messages.Message, dest *[]interface{}, markError bool) {
@@ -2524,7 +2528,7 @@ func (c *Client) RecoverPipelineOutput(ctx context.Context, shellID, commandID s
 		go drainVoid(pl.Verbose())
 		go drainVoid(pl.Debug())
 		go drainVoid(pl.Progress())
-		go drainVoid(pl.Information())
+		go drainChannel(pl.Information(), &infoOutput, false)
 
 		wg.Wait()
 
@@ -2536,63 +2540,52 @@ func (c *Client) RecoverPipelineOutput(ctx context.Context, shellID, commandID s
 		}
 
 		return &Result{
-			Output:    output,
-			Errors:    errOutput,
-			HadErrors: hadErrors,
+			Output:      output,
+			Errors:      errOutput,
+			Information: infoOutput,
+			HadErrors:   hadErrors,
 		}, nil
 	}
 
 	// 1. WSMan Specific Path
 	if wsmanBackend, ok := backend.(*powershell.WSManBackend); ok && wsmanClient != nil {
-		// Use existing WSMan pulled-based recovery if preferred, OR switch to AdoptPipeline if WSManTransport supports it.
-		// For now, keep legacy WSMan recovery for stability if it works for the user (user is likely HvSocket).
-		// BUT the user might use WSMan too.
-		// The existing WSMan logic uses 'wsman.Receive' which is raw WSMan.
-		// Let's keep it for WSMan backend.
-		epr := wsmanBackend.EPR()
-		if epr != nil {
-			// .. existing WSMan logic ...
-			// Copy-paste existing logic here or assume it's better to use the new AdoptPipeline approach for EVERYTHING?
-			// The new AdoptPipeline approach depends on PSRP messages arriving via the Transport.
-			// WSManTransport in go-psrp might NOT be sending messages to the pool if we bypass it with wsman.Receive.
-			// So we MUST keep legacy logic for WSMan unless we refactor WSMan backend significantly.
+		// Use standard PSRP pipeline logic but manually drive the transport receive loop
+		// because WSMan requires per-command receive requests.
 
-			var output []interface{}
-			var errOutput []interface{}
-
-			// Poll for output until done
-			for {
-				select {
-				case <-ctx.Done():
-					return nil, ctx.Err()
-				default:
-				}
-
-				result, err := wsmanClient.Receive(ctx, epr, commandID)
-				if err != nil {
-					return nil, fmt.Errorf("receive output: %w", err)
-				}
-
-				if len(result.Stdout) > 0 {
-					deser := serialization.NewDeserializer()
-					results, err := deser.Deserialize(result.Stdout)
-					deser.Close()
-					if err != nil {
-						output = append(output, string(result.Stdout))
-					} else {
-						output = append(output, results...)
-					}
-				}
-				if result.Done {
-					break
-				}
-			}
-			return &Result{Output: output, Errors: errOutput}, nil
+		cmdUUID, err := uuid.Parse(commandID)
+		if err != nil {
+			return nil, fmt.Errorf("invalid command id: %w", err)
 		}
+
+		// Create new pipeline
+		pl := pipeline.NewWithID(psrpPool, c.poolID, cmdUUID)
+
+		// Register with pool (so handleMessage works)
+		if err := psrpPool.AdoptPipeline(pl); err != nil {
+			return nil, fmt.Errorf("adopt pipeline: %w", err)
+		}
+
+		// Create Transport specifically for this recovered command
+		// Using the normalized IDs we ensured earlier
+		epr := wsmanBackend.EPR()
+		transport := powershell.NewWSManTransport(wsmanClient, epr, commandID)
+		transport.SetContext(ctx)
+
+		// Start the receive loop in background
+		// This reads fragments from WSMan, defragments them, and pushes Messages to the pipeline
+		go func() {
+			c.runPipelineReceive(ctx, transport, pl)
+			// Ensure pipeline is closed when transport is done
+			// pipeline doesn't have Close(), it checks for Done channel or Context
+
+		}()
+
+		// Wait for results
+		return collectResults(pl)
 	}
 
 	// 2. Generic PSRP Path (HvSocket / OutOfProc)
-	// Create a pipeline object with the specific ID and adopt it
+	// Create a pipeline object with the specific ID
 	cmdUUID, err := uuid.Parse(commandID)
 	if err != nil {
 		return nil, fmt.Errorf("invalid command id: %w", err)
