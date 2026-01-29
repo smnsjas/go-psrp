@@ -287,7 +287,7 @@ func DefaultConfig() Config {
 	return Config{
 		Port:                  5985,
 		UseTLS:                false,
-		Timeout:               60 * time.Second,
+		Timeout:               120 * time.Second,
 		AuthType:              AuthNegotiate, // Kerberos preferred, NTLM fallback
 		MaxRunspaces:          1,             // Default to safe serial execution
 		MaxConcurrentCommands: 1,             // Deprecated

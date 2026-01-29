@@ -55,6 +55,9 @@ adding transport layers, making it ready for production PowerShell remoting.
     - Supports **Extended Protection (Channel Binding Tokens)** for NTLM
   - Kerberos (pure Go via gokrb5, cross-platform)
     - Supports **Channel Binding Tokens (CBT)** for HTTPS (hardened security)
+    - WSMan/PSRP over HTTP uses DCE-style GSS wrap tokens (RFC 4121
+      Section 4.2.4); enabled automatically
+    - For custom SPNEGO usage, call `spnego.ClientContext.SetWrapTokenDCE(true)`
   - Windows SSPI (native Negotiate/Kerberos on Windows)
     - Supports both **NTLM** and **Kerberos** with CBT via SSPI
 - **Full PSRP Support** - RunspacePools, Pipelines, Output streams

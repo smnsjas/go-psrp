@@ -20,6 +20,8 @@ github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZb
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/smnsjas/go-ntlm-cbt v0.0.0-20260107203125-46149984fac0 h1:9XyUIT0CPPincOEhGrQ4LnhaKAC0GcizVg20W4rLSSA=
 github.com/smnsjas/go-ntlm-cbt v0.0.0-20260107203125-46149984fac0/go.mod h1:RX0oZzxPLsNlqOD4wEvFg1UNLlBbpQNJHvfs9pOLJSs=
+github.com/smnsjas/go-psrpcore v0.0.0-20251230192519-bf6b71a48d22 h1:pgLCZtK2w8suetvLIxlzBdtndeFqdGuaDsPGl5tb4uM=
+github.com/smnsjas/go-psrpcore v0.0.0-20251230192519-bf6b71a48d22/go.mod h1:fe7EnMMciPxTmhGD46eG7d+Ug/zyMMsy+k2uQMvLC2U=
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
 golang.org/x/crypto v0.46.0 h1:cKRW/pmt1pKAfetfu+RCEvjvZkA9RimPbh7bhFjGVBU=

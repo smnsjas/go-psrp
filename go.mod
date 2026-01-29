@@ -25,6 +25,5 @@ require (
 	golang.org/x/sys v0.39.0 // indirect
 )
 
-replace github.com/smnsjas/go-psrpcore => ../go-psrpcore
-
 replace github.com/go-krb5/krb5 => ../krb5
+replace github.com/smnsjas/go-psrpcore => ../go-psrpcore

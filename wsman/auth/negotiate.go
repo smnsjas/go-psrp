@@ -250,6 +250,7 @@ func (rt *negotiateRoundTripper) roundTripInternal(req *http.Request, bodyBytes 
 	// 1. We are retrying after a successful handshake (above)
 	// 2. We are making subsequent requests on an already established context
 	if isHTTP && rt.provider.Complete() && len(bodyBytes) > 0 {
+		// Encrypt
 		rt.mu.Lock()
 		defer rt.mu.Unlock()
 		slog.Debug("Negotiate: POST-AUTH HTTP REQUEST - Encrypting body", "plainLen", len(bodyBytes))
@@ -282,7 +283,11 @@ func (rt *negotiateRoundTripper) roundTripInternal(req *http.Request, bodyBytes 
 
 		// Check for error response
 		if resp.StatusCode >= 400 {
-			slog.Error("Negotiate: HTTP error response", "status", resp.Status)
+			if resp.StatusCode == 500 {
+				slog.Debug("Negotiate: HTTP 500 response (possible timeout)", "status", resp.Status)
+			} else {
+				slog.Error("Negotiate: HTTP error response", "status", resp.Status)
+			}
 		}
 
 		// Check if response is encrypted (multipart/encrypted)

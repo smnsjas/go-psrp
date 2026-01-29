@@ -431,7 +431,11 @@ func (c *Client) copyFileStreaming(ctx context.Context, file *os.File, remotePat
 
 	// Use a function to handle sending so we can defer CloseInput
 	sendErr := func() error {
-		defer sr.CloseInput(ctx)
+		defer func() {
+			if err := sr.CloseInput(ctx); err != nil {
+				c.logWarn("CopyFile: Failed to close input: %v", err)
+			}
+		}()
 
 		buf := make([]byte, chunkSize)
 		for i := int64(0); i < numChunks; i++ {

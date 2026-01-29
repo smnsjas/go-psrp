@@ -70,7 +70,7 @@ func main() {
 	useTLS := flag.Bool("tls", false, "Use HTTPS (port 5986)")
 	port := flag.Int("port", 0, "WinRM port (default: 5985 for HTTP, 5986 for HTTPS)")
 	insecure := flag.Bool("insecure", false, "Skip TLS certificate verification")
-	timeout := flag.Duration("timeout", 60*time.Second, "Operation timeout")
+	timeout := flag.Duration("timeout", 120*time.Second, "Operation timeout")
 	useNTLM := flag.Bool("ntlm", false, "Use NTLM authentication")
 	useKerberos := flag.Bool("kerberos", false, "Use Kerberos authentication")
 	realm := flag.String("realm", "", "Kerberos realm (e.g., EXAMPLE.COM)")

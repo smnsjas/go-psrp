@@ -264,7 +264,7 @@ func (c *Client) Receive(ctx context.Context, epr *EndpointReference, commandID 
 		WithMessageID("uuid:"+strings.ToUpper(uuid.New().String())).
 		WithReplyTo(AddressAnonymous).
 		WithMaxEnvelopeSize(512000).
-		WithOperationTimeout("PT20S").
+		WithOperationTimeout("PT1S").
 		WithSessionID(c.sessionID).
 		WithLocale("en-US").
 		WithDataLocale("en-US").

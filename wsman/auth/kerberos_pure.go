@@ -164,6 +164,9 @@ func (p *PureKerberosProvider) generateInitialToken() ([]byte, bool, error) {
 	// Use the sequence number from the Authenticator in NegTokenInit
 	clientCtx := spnego.NewClientContext(sessionKey, flagsUint, negTokenInit.InitialSeqNum())
 
+	// WSMan/PSRP over HTTP requires DCE-style wrap tokens (RFC 4121 Section 4.2.4).
+	clientCtx.SetWrapTokenDCE(true)
+
 	// Set MechTypes for mechListMIC verification
 	clientCtx.SetMechTypeListDER(negTokenInit.RawMechTypesDER())
 
