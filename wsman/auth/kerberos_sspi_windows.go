@@ -71,6 +71,11 @@ func (p *SSPIProvider) Unwrap(data []byte) ([]byte, error) {
 	return data, nil
 }
 
+// ProcessResponse is a no-op for SSPI as Step handles the token processing.
+func (p *SSPIProvider) ProcessResponse(ctx context.Context, authHeader string) error {
+	return nil
+}
+
 // Step performs a step in the SSPI handshake.
 func (p *SSPIProvider) Step(ctx context.Context, serverToken []byte) ([]byte, bool, error) {
 	if p.complete {
