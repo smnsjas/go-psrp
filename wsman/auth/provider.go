@@ -41,6 +41,11 @@ type SecurityProvider interface {
 	// HTTPS providers should return an error.
 	Unwrap(data []byte) ([]byte, error)
 
+	// ProcessResponse processes the final mutual authentication token (AP-REP) from the server.
+	// This is critical for pure Kerberos to establish the complete security context (session key).
+	// Should be called when the server returns a 200 OK with a WWW-Authenticate header.
+	ProcessResponse(ctx context.Context, authHeader string) error
+
 	// Close releases any resources associated with the context (e.g. handles).
 	Close() error
 }
