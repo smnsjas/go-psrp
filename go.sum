@@ -20,8 +20,8 @@ github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZb
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/smnsjas/go-ntlm-cbt v0.0.0-20260107203125-46149984fac0 h1:9XyUIT0CPPincOEhGrQ4LnhaKAC0GcizVg20W4rLSSA=
 github.com/smnsjas/go-ntlm-cbt v0.0.0-20260107203125-46149984fac0/go.mod h1:RX0oZzxPLsNlqOD4wEvFg1UNLlBbpQNJHvfs9pOLJSs=
-github.com/smnsjas/go-psrpcore v0.0.0-20260129214526-99d2a6aff11c h1:k16ueJ39v/Lxx9tJX2CZoWX+GlS+XnYosXj/35p0P6Y=
-github.com/smnsjas/go-psrpcore v0.0.0-20260129214526-99d2a6aff11c/go.mod h1:jQD6DZ5fbdmPO1vajs/lcIzph/HHpPG/nPRkRPG6qCk=
+github.com/smnsjas/go-psrpcore v0.0.0-20260129221240-693b4b10e7ba h1:OcC3Bm2kMomwrr4ce5MLUINLrX1SmpjPnBE144OdKvA=
+github.com/smnsjas/go-psrpcore v0.0.0-20260129221240-693b4b10e7ba/go.mod h1:jQD6DZ5fbdmPO1vajs/lcIzph/HHpPG/nPRkRPG6qCk=
 github.com/smnsjas/krb5 v0.0.0-20260129173902-49e50274bc95 h1:ON09Vux2sh5zka8Lz4tlpfkv9i+qpPEes6a/IXjOYHA=
 github.com/smnsjas/krb5 v0.0.0-20260129173902-49e50274bc95/go.mod h1:T7YFjMJjkPQgKxp7I/8eNiqumqXSuRi9AlMiV1TvnXs=
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
