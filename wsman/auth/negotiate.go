@@ -204,7 +204,7 @@ func (rt *negotiateRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 	// This is because the server sends the AP-REP (needed for mutual auth & session key) in the response.
 	// Only AFTER processing the AP-REP can we encrypt the real payload.
 	if isHTTP && !authComplete && len(bodyBytes) > 0 {
-		slog.Info("Negotiate: HTTP pre-auth with body - Initiating HANDSHAKE-FIRST flow")
+		slog.Debug("Negotiate: HTTP pre-auth with body - Initiating HANDSHAKE-FIRST flow")
 
 		// 1. Create a "Handshake" request (shallow copy, empty body)
 		handshakeReq := req.Clone(req.Context())
@@ -230,7 +230,7 @@ func (rt *negotiateRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 				_ = handshakeResp.Body.Close()
 			}
 		}
-		slog.Info("Negotiate: Handshake complete", "authComplete", rt.provider.Complete())
+		slog.Debug("Negotiate: Handshake complete", "authComplete", rt.provider.Complete())
 
 		// 4. Now that auth is supposedly complete, encrypt and send the real body
 		// We fall through to the logic below, which checks rt.provider.Complete()
@@ -334,14 +334,21 @@ func (rt *negotiateRoundTripper) roundTripInternal(req *http.Request, bodyBytes 
 	var cbtData []byte
 	trace := &httptrace.ClientTrace{
 		GotConn: func(info httptrace.GotConnInfo) {
-			if info.Conn != nil {
-				if tlsConn, ok := info.Conn.(*tls.Conn); ok {
-					state := tlsConn.ConnectionState()
-					cbtData = getCBTHash(&state)
-				}
-			} else if info.Conn == nil {
+			if info.Conn == nil {
 				slog.Warn("GotConn returned nil connection")
+				return
 			}
+			if tlsConn, ok := info.Conn.(*tls.Conn); ok {
+				state := tlsConn.ConnectionState()
+				cbtData = getCBTHash(&state)
+			}
+		},
+		TLSHandshakeDone: func(state tls.ConnectionState, err error) {
+			if err != nil {
+				slog.Warn("TLS handshake failed", "error", err)
+				return
+			}
+			cbtData = getCBTHash(&state)
 		},
 	}
 	ctx := httptrace.WithClientTrace(req.Context(), trace)
@@ -355,22 +362,10 @@ func (rt *negotiateRoundTripper) roundTripInternal(req *http.Request, bodyBytes 
 	var clientToken []byte
 	var serverToken []byte
 
-	// Initial call to Step() to generate first token
-	// Note: We use nil serverToken for the first step
-	var err error
-	clientToken, _, err = rt.provider.Step(ctx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("initial auth step failed: %w", err)
-	}
-
 	// Bounded retry loop for multi-leg SPNEGO (supports NTLM which needs 3 legs)
 	for attempt := 0; attempt < maxNegotiateRetries; attempt++ {
-		// Clone request to avoid data races and inject CBT data if available
-		reqCtx := ctx
-		if len(cbtData) > 0 {
-			reqCtx = context.WithValue(reqCtx, ContextKeyChannelBindings, cbtData)
-		}
-		reqClone := req.Clone(reqCtx)
+		// Clone request to avoid data races
+		reqClone := req.Clone(ctx)
 		if bodyBytes != nil {
 			reqClone.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 			reqClone.ContentLength = int64(len(bodyBytes))
@@ -388,20 +383,26 @@ func (rt *negotiateRoundTripper) roundTripInternal(req *http.Request, bodyBytes 
 		if err != nil {
 			return nil, err
 		}
+		if len(cbtData) == 0 && resp != nil && resp.TLS != nil {
+			cbtData = getCBTHash(resp.TLS)
+		}
+		slog.Debug("Negotiate: CBT status", "cbtLen", len(cbtData), "respTLS", resp != nil && resp.TLS != nil)
 
 		// Success - return response
 		if resp.StatusCode != http.StatusUnauthorized {
 			// Authentication complete!
-			// Check for mutual auth token (final leg)
-			authHeader := resp.Header.Get("WWW-Authenticate")
-			if authHeader != "" && strings.Contains(strings.ToLower(authHeader), "negotiate") {
-				parts := strings.SplitN(authHeader, " ", 2)
-				if len(parts) == 2 {
-					serverTokenBytes, _ := base64.StdEncoding.DecodeString(strings.TrimSpace(parts[1]))
-					if len(serverTokenBytes) > 0 {
-						slog.Info("Negotiate: Processing final mutual auth token")
-						if err := rt.provider.ProcessResponse(ctx, authHeader); err != nil {
-							slog.Warn("Negotiate: Failed to process final mutual auth token", "error", err)
+			// Process mutual auth token only once per context.
+			if !rt.provider.Complete() {
+				authHeader := resp.Header.Get("WWW-Authenticate")
+				if authHeader != "" && strings.Contains(strings.ToLower(authHeader), "negotiate") {
+					parts := strings.SplitN(authHeader, " ", 2)
+					if len(parts) == 2 {
+						serverTokenBytes, _ := base64.StdEncoding.DecodeString(strings.TrimSpace(parts[1]))
+						if len(serverTokenBytes) > 0 {
+							slog.Debug("Negotiate: Processing final mutual auth token")
+							if err := rt.provider.ProcessResponse(ctx, authHeader); err != nil {
+								slog.Warn("Negotiate: Failed to process final mutual auth token", "error", err)
+							}
 						}
 					}
 				}
@@ -432,9 +433,13 @@ func (rt *negotiateRoundTripper) roundTripInternal(req *http.Request, bodyBytes 
 			return nil, fmt.Errorf("negotiate authentication rejected: server returned 401 with bare Negotiate after receiving our token")
 		}
 
-		// Generate our response token
+		// Generate our response token (after capturing CBT)
 		var continueNeeded bool
-		clientToken, continueNeeded, err = rt.provider.Step(reqCtx, serverToken)
+		stepCtx := ctx
+		if len(cbtData) > 0 {
+			stepCtx = context.WithValue(ctx, ContextKeyChannelBindings, cbtData)
+		}
+		clientToken, continueNeeded, err = rt.provider.Step(stepCtx, serverToken)
 		if err != nil {
 			_ = resp.Body.Close()
 			return nil, fmt.Errorf("negotiate step failed: %w", err)

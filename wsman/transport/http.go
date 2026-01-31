@@ -35,6 +35,8 @@ var bufferPool = sync.Pool{
 	},
 }
 
+var insecureSkipVerifyWarnOnce sync.Once
+
 // getBuffer returns a buffer from the pool.
 func getBuffer() *bytes.Buffer {
 	return bufferPool.Get().(*bytes.Buffer)
@@ -88,11 +90,11 @@ func NewHTTPTransport(opts ...HTTPTransportOption) *HTTPTransport {
 				// Disable HTTP/2 - SPNEGO/Kerberos auth can have issues with HTTP/2 multiplexing
 				ForceAttemptHTTP2: false,
 				// Increase connection limits for concurrent command execution
-				// Each concurrent command needs its own connection for NTLM auth
-				// Default: 10 connections to support MaxConcurrentCommands=5 with headroom
-				MaxIdleConns:        20,
-				MaxIdleConnsPerHost: 10,
-				MaxConnsPerHost:     10,
+				// Increase connection limits for concurrent command execution
+				// We need enough connections to support high concurrency (e.g. 50 threads)
+				MaxIdleConns:        100,
+				MaxIdleConnsPerHost: 50,
+				MaxConnsPerHost:     50,
 				// Longer idle timeout for NTLM sessions
 				IdleConnTimeout: 90 * time.Second,
 			},
@@ -118,7 +120,9 @@ func WithTimeout(d time.Duration) HTTPTransportOption {
 func WithInsecureSkipVerify(skip bool) HTTPTransportOption {
 	return func(t *HTTPTransport) {
 		if skip {
-			fmt.Fprintf(os.Stderr, "WARNING: TLS certificate verification disabled. This is insecure and should only be used for testing.\n")
+			insecureSkipVerifyWarnOnce.Do(func() {
+				fmt.Fprintf(os.Stderr, "WARNING: TLS certificate verification disabled. This is insecure and should only be used for testing.\n")
+			})
 		}
 		transport := t.ensureHTTPTransport()
 		if transport.TLSClientConfig == nil {

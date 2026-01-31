@@ -40,3 +40,7 @@ cmd/*/main
 codeql-db/
 codeql-custom-queries-go/
 *.sarif
+
+# beads
+.beads/
+.gitattributes

@@ -105,7 +105,7 @@ func TestNegotiateRoundTrip_ChallengeResponse(t *testing.T) {
 	}
 
 	// NOTE: This test uses a GET with a body to TRIGGER the "Handshake First" logic.
-	// We expect the client to send a proactive auth header on the first request because Step() is called.
+	// We expect the client to send NO auth on the first request, then respond to the challenge.
 	requests := 0
 	transport := &MockRoundTripper{
 		RoundTripFunc: func(req *http.Request) (*http.Response, error) {
@@ -113,14 +113,9 @@ func TestNegotiateRoundTrip_ChallengeResponse(t *testing.T) {
 			auth := req.Header.Get("Authorization")
 
 			if requests == 1 {
-				// First request: Handshake First (Empty Body) + Proactive Auth Token
-				// Because Step() generates a token immediately in this mock.
-				expected := "Negotiate " + base64.StdEncoding.EncodeToString([]byte("client-token-1"))
-				if auth != expected {
-					// NOTE: If the real code decided NOT to send token on first empty handshake, this would be empty.
-					// But `roundTripInternal` calls `Step` if not complete. `Step` mock returns token.
-					// So we expect token.
-					t.Errorf("Req 1: auth header mismatch\ngot:  %s\nwant: %s", auth, expected)
+				// First request: Handshake First (Empty Body) with NO auth header
+				if auth != "" {
+					t.Errorf("Req 1: auth header should be empty, got: %s", auth)
 				}
 				// Return 401 to challenge (even though we sent token, server might want mutual auth or reject first)
 				// Or server accepts?
@@ -134,10 +129,7 @@ func TestNegotiateRoundTrip_ChallengeResponse(t *testing.T) {
 			}
 
 			if requests == 2 {
-				// Second request: Retry?
-				// If first was 401, we retry.
-				// Code should produce token again? Or Step continues?
-				// Our mock Step just returns "client-token-1" always.
+				// Second request: Retry with auth token
 				expected := "Negotiate " + base64.StdEncoding.EncodeToString([]byte("client-token-1"))
 				if auth != expected {
 					t.Errorf("Req 2: auth header mismatch\ngot:  %s\nwant: %s", auth, expected)
@@ -171,8 +163,8 @@ func TestNegotiateRoundTrip_ChallengeResponse(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Errorf("Final status = %d; want 200", resp.StatusCode)
 	}
-	if stepCalled != 3 {
-		t.Errorf("Step called %d times; want 3", stepCalled)
+	if stepCalled != 1 {
+		t.Errorf("Step called %d times; want 1", stepCalled)
 	}
 }
 

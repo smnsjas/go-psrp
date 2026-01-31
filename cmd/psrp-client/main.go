@@ -28,6 +28,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -127,6 +128,10 @@ func main() {
 
 	if *logLevel != "" {
 		_ = os.Setenv("PSRP_DEBUG", "1") // Enable legacy debug as well
+		level := parseLogLevel(*logLevel)
+		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+			Level: level,
+		})))
 	}
 
 	fmt.Println("PSRP Client - Codebase Fix v5 (Retry Logic)")
@@ -606,6 +611,7 @@ func main() {
 		if *noOverwrite {
 			opts = append(opts, client.WithNoOverwrite(true))
 		}
+		opts = append(opts, client.WithProgressCallback(newProgressPrinter(os.Stderr)))
 
 		// Track duration
 		startTime := time.Now()
@@ -864,6 +870,41 @@ func main() {
 			fmt.Printf("  ./psrp-client -server %s -user %s -tls -ntlm -insecure -reconnect %s -sessionid %q -poolid %q -script \"Write-Host 'Back'\"\n", *server, *username, shellID, *sessionID, poolIDVal)
 		} else {
 			fmt.Printf("  -reconnect %s -poolid %s\n", shellID, poolIDVal)
+		}
+	}
+}
+
+func parseLogLevel(level string) slog.Level {
+	switch strings.ToLower(level) {
+	case "debug":
+		return slog.LevelDebug
+	case "info":
+		return slog.LevelInfo
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelDebug
+	}
+}
+
+func newProgressPrinter(w io.Writer) func(int64, int64) {
+	var lastPrint time.Time
+	var lastPercent float64 = -1
+	return func(transferred, total int64) {
+		if total <= 0 {
+			return
+		}
+		percent := (float64(transferred) / float64(total)) * 100
+		if percent-lastPercent < 0.5 && time.Since(lastPrint) < 500*time.Millisecond {
+			return
+		}
+		lastPercent = percent
+		lastPrint = time.Now()
+		fmt.Fprintf(w, "\rProgress: %5.1f%% (%s/%s)", percent, formatBytes(transferred), formatBytes(total))
+		if transferred >= total {
+			fmt.Fprintln(w)
 		}
 	}
 }

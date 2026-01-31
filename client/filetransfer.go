@@ -369,7 +369,16 @@ func (c *Client) CopyFile(ctx context.Context, localPath, remotePath string, opt
 		"parallel":    opt.MaxConcurrency > 1 && numChunks > 1,
 	})
 
-	// Use streaming mode for transfer (replaces legacy serial and parallel modes)
+	// Determine optimization strategy
+	// If concurrency > 1 and file size > chunk size, use parallel upload
+	if opt.MaxConcurrency > 1 && numChunks > 1 {
+		if err := c.copyFileParallel(ctx, file, remotePath, opt, totalSize, progress); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	// Use streaming mode for serial/small transfers
 	// Streaming uses a single pipeline and feeds chunks as input, avoiding pipeline creation overhead.
 	if err := c.copyFileStreaming(ctx, file, remotePath, opt, totalSize, progress); err != nil {
 		return err
@@ -559,18 +568,17 @@ func (c *Client) copyFileStreaming(ctx context.Context, file *os.File, remotePat
 	return nil
 }
 
-// copyFileParallel uploads a file using parallel chunk transfers.
-// Uses errgroup for coordinated cancellation and error handling.
+// copyFileParallel uploads a file using concurrent pipelines.
+// This is faster for large files as it utilizes multiple connections.
 func (c *Client) copyFileParallel(ctx context.Context, file *os.File, remotePath string, opt FileTransferOptions, totalSize int64, progress *transferProgress) error {
 	chunkSize := int64(opt.ChunkSize)
 	numChunks := (totalSize + chunkSize - 1) / chunkSize
 
-	c.logInfo("CopyFile: Parallel upload with %d workers, %d chunks", opt.MaxConcurrency, numChunks)
+	c.logInfo("CopyFile: Parallel upload (chunks: %d, size: %d, concurrency: %d)", numChunks, totalSize, opt.MaxConcurrency)
 
-	// Step 1: Pre-allocate file to full size (enables parallel offset writes)
+	// Step 1: Pre-allocate file on server
 	preallocScript := generatePreallocateScript(remotePath, totalSize)
-	_, err := c.Execute(ctx, preallocScript)
-	if err != nil {
+	if _, err := c.Execute(ctx, preallocScript); err != nil {
 		c.logSecurityEvent("FILE_TRANSFER_FAILED", map[string]interface{}{
 			"operation": "CopyFile",
 			"phase":     "preallocate",
@@ -582,101 +590,136 @@ func (c *Client) copyFileParallel(ctx context.Context, file *os.File, remotePath
 		return fmt.Errorf("initialization failed: remote operation error")
 	}
 
-	// Step 2: Upload chunks in parallel
-	g, gctx := errgroup.WithContext(ctx)
-
-	// Semaphore to limit concurrency
-	sem := make(chan struct{}, opt.MaxConcurrency)
-
-	// Hasher for checksum (protected by mutex since we hash in-order after parallel upload)
-	var hasher hash.Hash
-	if opt.VerifyChecksum {
-		hasher = sha256.New()
+	// Step 2: Upload chunks in parallel using a worker pool
+	// We use a fixed number of workers to prevent connection storms and excessive auth.
+	// Each worker maintains its own cloned client (and thus its own Authenticated Transport).
+	concurrency := opt.MaxConcurrency
+	if concurrency > int(numChunks) {
+		concurrency = int(numChunks)
 	}
 
-	// Track chunk results for ordered hashing
+	// Job channel
+	type chunkJob struct {
+		index  int64
+		offset int64
+	}
+	jobCh := make(chan chunkJob, numChunks)
+	for i := int64(0); i < numChunks; i++ {
+		jobCh <- chunkJob{index: i, offset: i * chunkSize}
+	}
+	close(jobCh)
+
+	// Result map for checksum
 	type chunkResult struct {
 		index int64
 		data  []byte
 	}
-	chunkResults := make([]chunkResult, numChunks)
+	chunkResults := make(map[int64]chunkResult)
 	var resultsMu sync.Mutex
 
-	for i := int64(0); i < numChunks; i++ {
-		chunkIndex := i // Capture loop variable
+	g, ctx := errgroup.WithContext(ctx)
+
+	// Semaphore to limit concurrency (re-added for shared client)
+	sem := make(chan struct{}, opt.MaxConcurrency)
+
+	for w := 0; w < concurrency; w++ {
+		// Capture worker ID for logging/debugging
+		workerID := w
 
 		g.Go(func() error {
-			// Acquire semaphore
+			// Acquire semaphore to limit concurrency
 			select {
 			case sem <- struct{}{}:
 				defer func() { <-sem }()
-			case <-gctx.Done():
-				return gctx.Err()
+			case <-ctx.Done():
+				return ctx.Err()
 			}
 
-			offset := chunkIndex * chunkSize
-			length := chunkSize
-			if offset+length > totalSize {
-				length = totalSize - offset
+			// Reusable buffer for this worker
+			buf := make([]byte, chunkSize)
+
+				// Create a worker for this goroutine
+				// This ensures each worker gets its own Authentication Context to avoid race conditions.
+				workerClient, err := c.CreateWorker()
+				if err != nil {
+					return fmt.Errorf("create worker %d: %w", workerID, err)
+				}
+				if err := workerClient.Connect(ctx); err != nil {
+					_ = workerClient.Close(context.Background())
+					return fmt.Errorf("connect worker %d: %w", workerID, err)
+				}
+				defer workerClient.Close(context.Background())
+
+			for job := range jobCh {
+				// Check cancellation
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+
+				// Read chunk
+				// Use ReadAt on the shared file handle (thread-safe on *os.File)
+				n, err := file.ReadAt(buf, job.offset)
+				if err != nil && err != io.EOF {
+					return fmt.Errorf("read chunk %d: %w", job.index, err)
+				}
+				if n == 0 {
+					continue
+				}
+				chunkData := buf[:n]
+
+				// Encode chunk
+				chunkB64 := base64.StdEncoding.EncodeToString(chunkData)
+
+				// Validate Base64 size
+				if len(chunkB64) > maxChunkBase64Size {
+					return fmt.Errorf("chunk %d too large after encoding: %d bytes (limit: %d)", job.index, len(chunkB64), maxChunkBase64Size)
+				}
+
+				// Write chunk at specific offset
+				script := generateOffsetWriteScript(remotePath, job.offset, chunkB64)
+
+				// Use per-chunk timeout - each chunk gets its own deadline
+				chunkTimeout := opt.ChunkTimeout
+				if chunkTimeout == 0 {
+					chunkTimeout = 60 * time.Second
+				}
+				chunkCtx, chunkCancel := context.WithTimeout(ctx, chunkTimeout)
+
+				// Execute using dedicated worker client
+				_, execErr := workerClient.Execute(chunkCtx, script)
+				chunkCancel()
+
+				if execErr != nil {
+					c.logSecurityEvent("FILE_TRANSFER_FAILED", map[string]interface{}{
+						"operation": "CopyFile",
+						"phase":     "upload_chunk",
+						"chunk":     job.index,
+						"error":     execErr.Error(),
+					})
+					return fmt.Errorf("failed to upload chunk %d (worker %d): %w", job.index, workerID, execErr)
+				}
+
+				// Store for later hash computation (in order)
+				if opt.VerifyChecksum {
+					// Make a copy of the chunk data because buffer is reused
+					dataCopy := make([]byte, len(chunkData))
+					copy(dataCopy, chunkData)
+
+					resultsMu.Lock()
+					chunkResults[job.index] = chunkResult{index: job.index, data: dataCopy}
+					resultsMu.Unlock()
+				}
+
+				// Update progress
+				if progress != nil {
+					progress.update(int64(n))
+				}
+
+				// Log progress (but not too often to avoid spam)
+				if (job.index+1)%10 == 0 || job.index == numChunks-1 {
+					c.logInfo("CopyFile: Uploaded chunk %d/%d", job.index+1, numChunks)
+				}
 			}
-
-			// Read chunk at specific offset (thread-safe with ReadAt)
-			buf := make([]byte, length)
-			n, readErr := file.ReadAt(buf, offset)
-			if readErr != nil && readErr != io.EOF {
-				return fmt.Errorf("read chunk %d: %w", chunkIndex, readErr)
-			}
-
-			chunk := buf[:n]
-
-			// Store for later hash computation (in order)
-			if opt.VerifyChecksum {
-				resultsMu.Lock()
-				chunkResults[chunkIndex] = chunkResult{index: chunkIndex, data: chunk}
-				resultsMu.Unlock()
-			}
-
-			// Encode to Base64
-			b64 := base64.StdEncoding.EncodeToString(chunk)
-
-			// Validate Base64 size
-			if len(b64) > maxChunkBase64Size {
-				return fmt.Errorf("chunk %d too large after encoding: %d bytes", chunkIndex, len(b64))
-			}
-
-			// Write chunk at specific offset
-			script := generateOffsetWriteScript(remotePath, offset, b64)
-
-			// Use per-chunk timeout - each chunk gets its own deadline
-			// This allows large transfers to complete as long as chunks keep succeeding
-			chunkTimeout := opt.ChunkTimeout
-			if chunkTimeout == 0 {
-				chunkTimeout = 60 * time.Second
-			}
-			chunkCtx, chunkCancel := context.WithTimeout(gctx, chunkTimeout)
-			_, execErr := c.Execute(chunkCtx, script)
-			chunkCancel() // Clean up immediately
-
-			if execErr != nil {
-				c.logSecurityEvent("FILE_TRANSFER_FAILED", map[string]interface{}{
-					"operation": "CopyFile",
-					"phase":     "upload_chunk",
-					"chunk":     chunkIndex,
-					"error":     execErr.Error(),
-				})
-				return fmt.Errorf("failed to upload chunk %d/%d: remote operation error", chunkIndex+1, numChunks)
-			}
-
-			// Update progress
-			if progress != nil {
-				progress.update(int64(n))
-			}
-
-			// Log progress (but not too often to avoid spam)
-			if (chunkIndex+1)%10 == 0 || chunkIndex == numChunks-1 {
-				c.logInfo("CopyFile: Uploaded chunk %d/%d", chunkIndex+1, numChunks)
-			}
-
 			return nil
 		})
 	}
@@ -688,8 +731,16 @@ func (c *Client) copyFileParallel(ctx context.Context, file *os.File, remotePath
 
 	// Compute hash in order if verification enabled
 	if opt.VerifyChecksum {
-		for _, cr := range chunkResults {
-			hasher.Write(cr.data)
+		// Use a temporary hasher to assemble results
+		var hasher hash.Hash
+		if opt.VerifyChecksum {
+			hasher = sha256.New()
+		}
+
+		for i := int64(0); i < numChunks; i++ {
+			if cr, ok := chunkResults[i]; ok {
+				hasher.Write(cr.data)
+			}
 		}
 
 		localHash := hex.EncodeToString(hasher.Sum(nil))
@@ -708,14 +759,34 @@ func (c *Client) copyFileParallel(ctx context.Context, file *os.File, remotePath
 			}
 		`, remotePathB64)
 
-		result, verifyErr := c.Execute(ctx, verifyScript)
+		// Retry verification up to 3 times
+		// Large uploads can cause temporary stability issues or timeouts on the next command
+		var result *Result
+		var verifyErr error
+
+		for attempt := 0; attempt < 3; attempt++ {
+			if attempt > 0 {
+				time.Sleep(1 * time.Second)
+				c.logInfo("CopyFile: Retrying checksum verification (attempt %d/3)...", attempt+1)
+			}
+
+			// Use a fresh context for verification to avoid inheriting timeout from upload if it's tight
+			verifyCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			result, verifyErr = c.Execute(verifyCtx, verifyScript)
+			cancel()
+
+			if verifyErr == nil {
+				break
+			}
+		}
+
 		if verifyErr != nil {
 			c.logSecurityEvent("FILE_TRANSFER_FAILED", map[string]interface{}{
 				"operation": "CopyFile",
 				"phase":     "verify_checksum",
 				"error":     verifyErr.Error(),
 			})
-			return fmt.Errorf("failed to verify checksum: remote operation error")
+			return fmt.Errorf("failed to verify checksum: remote operation error: %v", verifyErr)
 		}
 
 		var output string
