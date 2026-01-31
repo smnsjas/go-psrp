@@ -5,6 +5,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -13,6 +14,8 @@ import (
 
 	"github.com/alexbrainman/sspi"
 )
+
+const secEInvalidToken = 0x80090308
 
 // SSPIConfig holds configuration for the SSPI provider.
 type SSPIConfig struct {
@@ -111,7 +114,24 @@ func (p *SSPIProvider) Step(ctx context.Context, serverToken []byte) ([]byte, bo
 	// Call UpdateContextWithChannelBindings
 	outputToken, authCompleted, err := p.updateContextWithChannelBindings(serverToken)
 	if err != nil {
-		return nil, false, err
+		var sspiErr sspiStatusError
+		if errors.As(err, &sspiErr) && sspiErr.code == secEInvalidToken && len(serverToken) == 0 {
+			slog.Debug("SSPI invalid token on initial step, resetting context", "code", fmt.Sprintf("0x%x", sspiErr.code))
+			if p.ctx != nil {
+				_ = p.ctx.Release()
+				p.ctx = nil
+			}
+			p.complete = false
+			if initErr := p.initializeCredentials(); initErr != nil {
+				return nil, false, initErr
+			}
+			outputToken, authCompleted, err = p.updateContextWithChannelBindings(serverToken)
+			if err != nil {
+				return nil, false, err
+			}
+		} else {
+			return nil, false, err
+		}
 	}
 
 	p.complete = authCompleted
@@ -154,22 +174,43 @@ func (p *SSPIProvider) initializeCredentials() error {
 }
 
 // updateContextWithChannelBindings performs SSPI context update with optional channel bindings.
+type sspiStatusError struct {
+	code uint32
+}
+
+func (e sspiStatusError) Error() string {
+	return fmt.Sprintf("SSPI InitializeSecurityContext: error 0x%x", e.code)
+}
+
 func (p *SSPIProvider) updateContextWithChannelBindings(serverToken []byte) ([]byte, bool, error) {
-	// Prepare input buffers - TOKEN first, then CHANNEL_BINDINGS
+	// Prepare input buffers.
+	// On the first call, SSPI expects no input token. Passing an empty
+	// TOKEN buffer can return SEC_E_INVALID_TOKEN on some systems.
 	var inBuf [2]sspi.SecBuffer
+	var inBufs *sspi.SecBufferDesc
 
-	// TOKEN buffer (always present, even if empty)
-	inBuf[0].Set(sspi.SECBUFFER_TOKEN, serverToken)
-	inBufs := &sspi.SecBufferDesc{
-		Version:      sspi.SECBUFFER_VERSION,
-		BuffersCount: 1,
-		Buffers:      &inBuf[0],
-	}
+	if len(serverToken) > 0 {
+		// TOKEN buffer first
+		inBuf[0].Set(sspi.SECBUFFER_TOKEN, serverToken)
+		inBufs = &sspi.SecBufferDesc{
+			Version:      sspi.SECBUFFER_VERSION,
+			BuffersCount: 1,
+			Buffers:      &inBuf[0],
+		}
 
-	// Add channel bindings if available
-	if len(p.channelBindings) > 0 {
-		inBuf[1].Set(sspi.SECBUFFER_CHANNEL_BINDINGS, p.channelBindings)
-		inBufs.BuffersCount = 2
+		// Add channel bindings if available
+		if len(p.channelBindings) > 0 {
+			inBuf[1].Set(sspi.SECBUFFER_CHANNEL_BINDINGS, p.channelBindings)
+			inBufs.BuffersCount = 2
+		}
+	} else if len(p.channelBindings) > 0 {
+		// First call with CBT only (no input token)
+		inBuf[0].Set(sspi.SECBUFFER_CHANNEL_BINDINGS, p.channelBindings)
+		inBufs = &sspi.SecBufferDesc{
+			Version:      sspi.SECBUFFER_VERSION,
+			BuffersCount: 1,
+			Buffers:      &inBuf[0],
+		}
 	}
 
 	// Prepare output buffer
@@ -203,7 +244,7 @@ func (p *SSPIProvider) updateContextWithChannelBindings(serverToken []byte) ([]b
 		}
 		return dst[:n], true, nil
 	default:
-		return nil, false, fmt.Errorf("SSPI InitializeSecurityContext: error 0x%x", uint32(ret))
+		return nil, false, sspiStatusError{code: uint32(ret)}
 	}
 }
 

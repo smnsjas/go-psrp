@@ -1073,6 +1073,38 @@ func New(hostname string, cfg Config) (*Client, error) {
 	}
 }
 
+// CloneForWorker creates a lightweight clone of the client for parallel operations.
+// The cloned client shares the configuration and targets the SAME remote Shell,
+// but uses a dedicated Transport (and thus a dedicated Authentication Context/TCP connection).
+// This is critical for HTTP-based protocols (like Kerberos over HTTP) where security contexts
+// are often bound to the connection.
+// CreateWorker creates a new independent client for parallel operations.
+// This ensures each worker runs in its own RunspacePool with its own Authentication Context,
+// avoiding WinRM "Shared Shell" errors and Auth Loop race conditions.
+func (c *Client) CreateWorker() (*Client, error) {
+	return New(c.hostname, c.config)
+}
+
+// CloseIdleConnections closes any idle connections in the underlying transport.
+func (c *Client) CloseIdleConnections() {
+	c.mu.Lock()
+	backend := c.backend
+	c.mu.Unlock()
+
+	if backend == nil {
+		return
+	}
+
+	// Dynamic check for CloseIdleConnections support in backend
+	type idleCloser interface {
+		CloseIdleConnections()
+	}
+
+	if closer, ok := backend.(idleCloser); ok {
+		closer.CloseIdleConnections()
+	}
+}
+
 // Endpoint returns the WinRM endpoint URL.
 func (c *Client) Endpoint() string {
 	return c.endpoint

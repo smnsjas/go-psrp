@@ -61,6 +61,27 @@ func NewWSManBackend(client PoolClient, transport *WSManTransport) *WSManBackend
 	}
 }
 
+// SetEPR sets the EndpointReference (used for cloning/worker creation).
+func (b *WSManBackend) SetEPR(epr *wsman.EndpointReference) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.epr = epr
+	// Extract ShellID from selectors if present
+	for _, s := range epr.Selectors {
+		if strings.EqualFold(s.Name, "ShellId") {
+			b.shellID = s.Value
+			break
+		}
+	}
+}
+
+// SetOpened sets the opened state (used for cloning/worker creation).
+func (b *WSManBackend) SetOpened(opened bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.opened = opened
+}
+
 // SetResourceURI sets the WSMan ResourceURI (e.g. for JEA endpoints).
 func (b *WSManBackend) SetResourceURI(uri string) {
 	b.mu.Lock()
@@ -180,6 +201,13 @@ func (b *WSManBackend) Close(ctx context.Context) error {
 
 	b.closed = true
 	return nil
+}
+
+// CloseIdleConnections closes any idle transport connections.
+func (b *WSManBackend) CloseIdleConnections() {
+	if b.client != nil {
+		b.client.CloseIdleConnections()
+	}
 }
 
 // SupportsPSRPKeepalive returns false for WSMan.
