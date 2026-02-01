@@ -7,7 +7,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log/slog"
-	"math"
 	"os"
 	"strings"
 
@@ -28,7 +27,6 @@ const ContextKeyIsHTTPS = contextKey("isHTTPS")
 // PureKerberosProvider implements SecurityProvider using the pure Go gokrb5 library.
 type PureKerberosProvider struct {
 	client        *client.Client
-	spnegoClient  *spnego.Client        // For HTTPS (TLS encryption)
 	clientContext *spnego.ClientContext // For HTTP: strict GSS-API context from fork
 	targetSPN     string
 	isComplete    bool
@@ -130,11 +128,7 @@ func (p *PureKerberosProvider) Step(ctx context.Context, inputToken []byte) ([]b
 
 // generateInitialToken creates the first NegTokenInit with AP-REQ
 func (p *PureKerberosProvider) generateInitialToken() ([]byte, bool, error) {
-	// HTTPS Logic (TLS handles encryption, so standard SPNEGO header)
-	if p.isHTTPS {
-		return nil, false, fmt.Errorf("HTTPS authentication temporarily disabled due to library mismatch (SetSPNEGOHeader undefined)")
-	}
-
+	// HTTPS Logic (TLS handles encryption; still use standard SPNEGO token flow).
 	// HTTP Logic (Application Layer Encryption)
 	// 1. Get service ticket
 	tkt, sessionKey, err := p.client.GetServiceTicket(p.targetSPN)
@@ -165,7 +159,9 @@ func (p *PureKerberosProvider) generateInitialToken() ([]byte, bool, error) {
 	clientCtx := spnego.NewClientContext(sessionKey, flagsUint, negTokenInit.InitialSeqNum())
 
 	// WSMan/PSRP over HTTP requires DCE-style wrap tokens (RFC 4121 Section 4.2.4).
-	clientCtx.SetWrapTokenDCE(true)
+	if !p.isHTTPS {
+		clientCtx.SetWrapTokenDCE(true)
+	}
 
 	// Set MechTypes for mechListMIC verification
 	clientCtx.SetMechTypeListDER(negTokenInit.RawMechTypesDER())
@@ -387,14 +383,15 @@ func (p *PureKerberosProvider) Wrap(inputData []byte) ([]byte, error) {
 	// For EC=0: SignatureLength = 16 + 28 + 16 = 60
 	// For EC=16: SignatureLength = 16 + 44 + 16 = 76
 	const confounderLen = 16 // AES confounder is always 16 bytes
-	signatureLen := gssHdrLen + int(rrc) + confounderLen
-	if len(tokenBytes) < signatureLen {
-		return nil, fmt.Errorf("token too short: %d < %d", len(tokenBytes), signatureLen)
+	signatureLen := uint32(gssHdrLen) + uint32(rrc) + uint32(confounderLen)
+	signatureLenInt := int(signatureLen)
+	if len(tokenBytes) < signatureLenInt {
+		return nil, fmt.Errorf("token too short: %d < %d", len(tokenBytes), signatureLenInt)
 	}
 
 	// Split the GSS token into Signature and EncryptedData portions
-	signature := tokenBytes[:signatureLen]
-	encryptedData := tokenBytes[signatureLen:]
+	signature := tokenBytes[:signatureLenInt]
+	encryptedData := tokenBytes[signatureLenInt:]
 
 	// Build MS-WSMV sealed format: [SigLen][Signature][EncryptedData]
 	// Note: NO EncryptedDataLength prefix - the encrypted data follows directly after signature
@@ -404,11 +401,8 @@ func (p *PureKerberosProvider) Wrap(inputData []byte) ([]byte, error) {
 	output := bytes.NewBuffer(make([]byte, 0, totalLen))
 
 	// SignatureLength (4 bytes, little-endian)
-	if uint64(signatureLen) > math.MaxUint32 {
-		return nil, fmt.Errorf("signature length overflow: %d", signatureLen)
-	}
 	var sigLenBytes [4]byte // Use stack-allocated array (optimization)
-	binary.LittleEndian.PutUint32(sigLenBytes[:], uint32(signatureLen))
+	binary.LittleEndian.PutUint32(sigLenBytes[:], signatureLen)
 	output.Write(sigLenBytes[:])
 
 	// Signature (header + rotated checksum)

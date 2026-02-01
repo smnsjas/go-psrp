@@ -44,7 +44,7 @@ func TestCircuitBreaker_StateTransitions(t *testing.T) {
 	}
 
 	// 4. Failure 2 (Threshold reached)
-	err = cb.Execute(func() error { return dummyErr })
+	_ = cb.Execute(func() error { return dummyErr })
 	if state := cb.State(); state != StateOpen {
 		t.Errorf("After 2 failures state = %v, want Open", state)
 	}

@@ -3,8 +3,9 @@ package client
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"math"
-	"math/rand/v2"
 	"sync"
 	"time"
 )
@@ -203,8 +204,21 @@ func (rm *reconnectManager) calculateBackoff(baseDelay time.Duration) time.Durat
 	}
 
 	// Add jitter: delay * (1 + random(0, jitter))
-	jitterFactor := 1.0 + (rand.Float64() * rm.policy.Jitter)
+	jitter := 0.0
+	if value, err := cryptoRandFloat64(); err == nil {
+		jitter = value
+	}
+	jitterFactor := 1.0 + (jitter * rm.policy.Jitter)
 	return time.Duration(float64(baseDelay) * jitterFactor)
+}
+
+func cryptoRandFloat64() (float64, error) {
+	var buf [8]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return 0, err
+	}
+	value := binary.LittleEndian.Uint64(buf[:])
+	return float64(value) / float64(^uint64(0)), nil
 }
 
 // isTransientError returns true if the error is likely transient and worth retrying.

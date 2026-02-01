@@ -3,6 +3,11 @@
 
 package auth
 
+const (
+	SSPIPackageNegotiate = "Negotiate"
+	SSPIPackageKerberos  = "Kerberos"
+)
+
 // KerberosProviderConfig holds unified config for any Kerberos provider.
 // This type is shared across all platforms.
 type KerberosProviderConfig struct {
@@ -28,4 +33,9 @@ type KerberosProviderConfig struct {
 
 	// Credentials are username/password credentials (optional).
 	Credentials *Credentials
+
+	// SSPIPackage selects the SSPI package on Windows (default: Negotiate).
+	// Use "Kerberos" to disable NTLM fallback for Kerberos-only auth.
+	// Ignored on non-Windows platforms.
+	SSPIPackage string
 }

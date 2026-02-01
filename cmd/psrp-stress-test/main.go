@@ -83,7 +83,9 @@ func main() {
 		}
 		// Set env var for legacy debug
 		if level == slog.LevelDebug {
-			os.Setenv("PSRP_DEBUG", "1")
+			if err := os.Setenv("PSRP_DEBUG", "1"); err != nil {
+				fmt.Fprintf(os.Stderr, "Failed to set PSRP_DEBUG: %v\n", err)
+			}
 		}
 	}
 

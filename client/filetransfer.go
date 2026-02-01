@@ -18,14 +18,6 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// Buffer pool for chunk allocation (zero-copy optimization)
-var bufferPool = sync.Pool{
-	New: func() interface{} {
-		b := make([]byte, 256*1024) // 256KB default
-		return &b
-	},
-}
-
 const (
 	// maxChunkBase64Size limits Base64 encoded chunk size (defense in depth)
 	maxChunkBase64Size = 2 * 1024 * 1024 // 2MB Base64 (~1.5MB raw)
@@ -215,45 +207,6 @@ func sanitizeForPowerShell(s string) string {
 	return strings.ReplaceAll(s, "'", "''")
 }
 
-// generateInitScript creates the PowerShell script to initialize the destination file.
-// It uses Base64 encoding for the path to prevent command injection.
-func generateInitScript(remotePath string) string {
-	remotePathB64 := base64.StdEncoding.EncodeToString([]byte(remotePath))
-	return fmt.Sprintf(`
-		$ErrorActionPreference = 'Stop'
-		try {
-			$pathBytes = [System.Convert]::FromBase64String('%s')
-			$path = [System.Text.Encoding]::UTF8.GetString($pathBytes)
-			$stream = [IO.File]::Create($path)
-			$stream.Close()
-		} catch {
-			Write-Error "Failed to create file: $_"
-			exit 1
-		}
-	`, remotePathB64)
-}
-
-// generateAppendScript creates the PowerShell script to append a chunk to the destination file.
-// It uses Base64 encoding for the path to prevent command injection.
-func generateAppendScript(remotePath, chunkB64 string) string {
-	remotePathB64 := base64.StdEncoding.EncodeToString([]byte(remotePath))
-	return fmt.Sprintf(`
-		$ErrorActionPreference = 'Stop'
-		try {
-			$pathBytes = [System.Convert]::FromBase64String('%s')
-			$path = [System.Text.Encoding]::UTF8.GetString($pathBytes)
-			
-			$bytes = [Convert]::FromBase64String('%s')
-			$stream = [IO.File]::Open($path, [IO.FileMode]::Append)
-			$stream.Write($bytes, 0, $bytes.Length)
-			$stream.Close()
-		} catch {
-			Write-Error "Failed to write chunk: $_"
-			exit 1
-		}
-	`, remotePathB64, chunkB64)
-}
-
 // generateOffsetWriteScript creates a PowerShell script to write a chunk at a specific offset.
 // This enables parallel chunk uploads by allowing out-of-order writes.
 func generateOffsetWriteScript(remotePath string, offset int64, chunkB64 string) string {
@@ -310,7 +263,8 @@ func (c *Client) CopyFile(ctx context.Context, localPath, remotePath string, opt
 		return fmt.Errorf("path validation failed: %w", err)
 	}
 
-	// Open local file
+	// Open local file (path validated in validatePaths)
+	// #nosec G304 -- localPath is user-supplied and validated for traversal.
 	file, err := os.Open(localPath)
 	if err != nil {
 		return fmt.Errorf("failed to open local file: %w", err)
@@ -883,11 +837,15 @@ func (c *Client) FetchFile(ctx context.Context, remotePath, localPath string, op
 
 	if totalSize == 0 {
 		// Empty file - just create it locally
+		// Create local file (path validated in validatePaths)
+		// #nosec G304 -- localPath is user-supplied and validated for traversal.
 		file, createErr := os.Create(localPath)
 		if createErr != nil {
 			return fmt.Errorf("failed to create local file: %w", createErr)
 		}
-		file.Close()
+		if closeErr := file.Close(); closeErr != nil {
+			return fmt.Errorf("failed to close local file: %w", closeErr)
+		}
 		c.logInfo("FetchFile: Created empty file %s", localPath)
 		return nil
 	}
@@ -920,7 +878,8 @@ func (c *Client) FetchFile(ctx context.Context, remotePath, localPath string, op
 		"chunk_count": numChunks,
 	})
 
-	// Create local file
+	// Create local file (path validated in validatePaths)
+	// #nosec G304 -- localPath is user-supplied and validated for traversal.
 	file, err := os.Create(localPath)
 	if err != nil {
 		return fmt.Errorf("failed to create local file: %w", err)

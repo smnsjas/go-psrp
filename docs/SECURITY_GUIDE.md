@@ -75,6 +75,20 @@ cfg.UseTLS = true
 // (Automatically warns if not using TLS)
 ```
 
+### Kerberos over HTTP (Message-Level Encryption)
+
+When using Kerberos over HTTP (port 5985), WinRM uses message-level encryption (SPNEGO wrap) instead of TLS. The client enforces the following security behavior:
+
+- **Encrypted responses required** after the Kerberos context is established
+- **Response size capped** to limit memory use
+
+Defaults:
+
+- **Max encrypted response**: 1 MB  
+  This is set to allow overhead for encryption/multipart framing while staying close to the WSMan MaxEnvelopeSize (`512000` bytes by default in this codebase).
+
+If your environment raises `MaxEnvelopeSizeKb`, consider increasing this limit accordingly.
+
 ### Session State Protection
 
 Session state files are created with restricted permissions (0600) to prevent unauthorized access:

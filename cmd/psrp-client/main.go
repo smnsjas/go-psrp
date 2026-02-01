@@ -892,6 +892,7 @@ func parseLogLevel(level string) slog.Level {
 func newProgressPrinter(w io.Writer) func(int64, int64) {
 	var lastPrint time.Time
 	var lastPercent float64 = -1
+	var lastLen int
 	return func(transferred, total int64) {
 		if total <= 0 {
 			return
@@ -902,7 +903,12 @@ func newProgressPrinter(w io.Writer) func(int64, int64) {
 		}
 		lastPercent = percent
 		lastPrint = time.Now()
-		fmt.Fprintf(w, "\rProgress: %5.1f%% (%s/%s)", percent, formatBytes(transferred), formatBytes(total))
+		line := fmt.Sprintf("Progress: %5.1f%% (%s/%s)", percent, formatBytes(transferred), formatBytes(total))
+		if len(line) < lastLen {
+			line += strings.Repeat(" ", lastLen-len(line))
+		}
+		lastLen = len(line)
+		fmt.Fprintf(w, "\r%s", line)
 		if transferred >= total {
 			fmt.Fprintln(w)
 		}

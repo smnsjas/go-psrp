@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/smnsjas/go-psrp/winrs"
-	"github.com/smnsjas/go-psrp/wsman"
 )
 
 // CmdResult holds the result of a WinRS command execution.
@@ -252,10 +251,4 @@ func (c *Client) ExecuteCmdStream(ctx context.Context, command string) (*CmdStre
 		shell:  shell,
 		proc:   proc,
 	}, nil
-}
-
-// winrsTransport is an adapter for *wsman.Client to satisfy winrs.Transport.
-// This is used internally - users should use ExecuteCmd/ExecuteCmdStream.
-type winrsTransport struct {
-	client *wsman.Client
 }

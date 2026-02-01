@@ -5,6 +5,8 @@ package auth
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -23,6 +25,7 @@ type SSPIConfig struct {
 	Username        string
 	Password        string
 	Domain          string
+	PackageName     string
 }
 
 // SSPIProvider implements the SecurityProvider interface using Windows SSPI.
@@ -34,20 +37,27 @@ type SSPIProvider struct {
 	targetSPN       string
 	complete        bool
 	channelBindings []byte // Store CBT for reuse in Update calls
+	isHTTPS         bool
 
 	// Internal state
 	cred       *sspi.Credentials
 	ctx        *sspi.Context
 	targetName *uint16
 	maxToken   uint32
+	packageName string
 }
 
 // NewSSPIProvider creates a new SSPI-based provider.
 func NewSSPIProvider(config SSPIConfig, targetSPN string) (*SSPIProvider, error) {
+	packageName := config.PackageName
+	if packageName == "" {
+		packageName = sspi.NEGOSSP_NAME
+	}
+
 	// Query package info for max token size
-	pkgInfo, err := sspi.QueryPackageInfo(sspi.NEGOSSP_NAME)
+	pkgInfo, err := sspi.QueryPackageInfo(packageName)
 	if err != nil {
-		return nil, fmt.Errorf("query negotiate package: %w", err)
+		return nil, fmt.Errorf("query SSPI package: %w", err)
 	}
 
 	return &SSPIProvider{
@@ -56,6 +66,7 @@ func NewSSPIProvider(config SSPIConfig, targetSPN string) (*SSPIProvider, error)
 		domain:    config.Domain,
 		targetSPN: targetSPN,
 		maxToken:  pkgInfo.MaxToken,
+		packageName: packageName,
 	}, nil
 }
 
@@ -64,18 +75,96 @@ func (p *SSPIProvider) Complete() bool {
 	return p.complete
 }
 
-// Wrap is a no-op for HTTP auth.
+// Wrap encrypts data for HTTP transport using SSPI sealing.
+// This is ONLY called for HTTP (not HTTPS/TLS) - encryption is application-layer.
 func (p *SSPIProvider) Wrap(data []byte) ([]byte, error) {
-	return data, nil
+	if p.isHTTPS {
+		return nil, fmt.Errorf("wrap called for HTTPS connection (encryption handled by TLS)")
+	}
+	if p.ctx == nil || !p.complete {
+		return nil, fmt.Errorf("cannot wrap: SSPI context not initialized")
+	}
+
+	_, _, blockSize, securityTrailer, err := p.ctx.Sizes()
+	if err != nil {
+		return nil, fmt.Errorf("query SSPI sizes: %w", err)
+	}
+
+	var buffers [3]sspi.SecBuffer
+	buffers[0].Set(sspi.SECBUFFER_TOKEN, make([]byte, securityTrailer))
+	buffers[1].Set(sspi.SECBUFFER_DATA, data)
+	buffers[2].Set(sspi.SECBUFFER_PADDING, make([]byte, blockSize))
+
+	ret := sspi.EncryptMessage(p.ctx.Handle, 0, sspi.NewSecBufferDesc(buffers[:]), 0)
+	if ret != sspi.SEC_E_OK {
+		return nil, sspiStatusError{code: uint32(ret)}
+	}
+
+	signature := buffers[0].Bytes()
+	encryptedData := append(buffers[1].Bytes(), buffers[2].Bytes()...)
+	totalLen := 4 + len(signature) + len(encryptedData)
+	out := make([]byte, totalLen)
+	binary.LittleEndian.PutUint32(out[:4], uint32(len(signature)))
+	copy(out[4:], signature)
+	copy(out[4+len(signature):], encryptedData)
+
+	return out, nil
 }
 
-// Unwrap is a no-op for HTTP auth.
+// Unwrap decrypts data from HTTP transport.
+// This is ONLY called for HTTP (not HTTPS/TLS) - decryption is application-layer.
 func (p *SSPIProvider) Unwrap(data []byte) ([]byte, error) {
-	return data, nil
+	if p.isHTTPS {
+		return nil, fmt.Errorf("unwrap called for HTTPS connection (encryption handled by TLS)")
+	}
+	if p.ctx == nil || !p.complete {
+		return nil, fmt.Errorf("cannot unwrap: SSPI context not initialized")
+	}
+	if len(data) < 4 {
+		return nil, fmt.Errorf("data too short for MS-WSMV format: %d bytes", len(data))
+	}
+
+	signatureLen := binary.LittleEndian.Uint32(data[:4])
+	const maxSignatureLen = 100 * 1024 * 1024
+	if signatureLen > maxSignatureLen {
+		return nil, fmt.Errorf("signature length too large: %d > %d", signatureLen, maxSignatureLen)
+	}
+	if int64(signatureLen) > int64(len(data)-4) {
+		return nil, fmt.Errorf("data too short for signature: need %d, have %d", 4+int(signatureLen), len(data))
+	}
+
+	stream := data[4:]
+	var buffers [2]sspi.SecBuffer
+	buffers[0].Set(sspi.SECBUFFER_STREAM, stream)
+	buffers[1].Set(sspi.SECBUFFER_DATA, []byte{})
+
+	var qop uint32
+	ret := sspi.DecryptMessage(p.ctx.Handle, sspi.NewSecBufferDesc(buffers[:]), 0, &qop)
+	if ret != sspi.SEC_E_OK {
+		return nil, sspiStatusError{code: uint32(ret)}
+	}
+
+	return buffers[1].Bytes(), nil
 }
 
 // ProcessResponse is a no-op for SSPI as Step handles the token processing.
 func (p *SSPIProvider) ProcessResponse(ctx context.Context, authHeader string) error {
+	parts := strings.SplitN(authHeader, " ", 2)
+	if len(parts) != 2 {
+		return nil
+	}
+	token, err := base64.StdEncoding.DecodeString(strings.TrimSpace(parts[1]))
+	if err != nil || len(token) == 0 {
+		return nil
+	}
+
+	outputToken, authCompleted, err := p.Step(ctx, token)
+	if err != nil {
+		return err
+	}
+	if len(outputToken) > 0 && !authCompleted {
+		slog.Debug("SSPI ProcessResponse returned extra token", "tokenLen", len(outputToken))
+	}
 	return nil
 }
 
@@ -99,6 +188,9 @@ func (p *SSPIProvider) Step(ctx context.Context, serverToken []byte) ([]byte, bo
 			return nil, false, fmt.Errorf("convert SPN to UTF-16: %w", err)
 		}
 		p.targetName = tname
+
+		isHTTPS, _ := ctx.Value(ContextKeyIsHTTPS).(bool)
+		p.isHTTPS = isHTTPS
 
 		// Store CBT from context for reuse
 		if cbtHash, ok := ctx.Value(ContextKeyChannelBindings).([]byte); ok && len(cbtHash) > 0 {
@@ -146,7 +238,7 @@ func (p *SSPIProvider) initializeCredentials() error {
 	if p.username == "" {
 		// Use current user (SSO)
 		slog.Debug("Acquiring current user credentials (SSO)")
-		p.cred, err = sspi.AcquireCredentials("", sspi.NEGOSSP_NAME, sspi.SECPKG_CRED_OUTBOUND, nil)
+		p.cred, err = sspi.AcquireCredentials("", p.packageName, sspi.SECPKG_CRED_OUTBOUND, nil)
 	} else {
 		// Build auth identity for explicit credentials
 		slog.Debug("Acquiring user credentials", "domain", p.domain, "username", p.username)
@@ -154,7 +246,7 @@ func (p *SSPIProvider) initializeCredentials() error {
 		if identityErr != nil {
 			return fmt.Errorf("build auth identity: %w", identityErr)
 		}
-		p.cred, err = sspi.AcquireCredentials("", sspi.NEGOSSP_NAME, sspi.SECPKG_CRED_OUTBOUND, identity)
+		p.cred, err = sspi.AcquireCredentials("", p.packageName, sspi.SECPKG_CRED_OUTBOUND, identity)
 	}
 	if err != nil {
 		return fmt.Errorf("acquire SSPI credentials: %w", err)

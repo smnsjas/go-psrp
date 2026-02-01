@@ -464,13 +464,6 @@ func (c *Client) ensureLogger() {
 	}))
 }
 
-// logfLocked logs a debug message assuming the client lock is already held.
-func (c *Client) logfLocked(format string, v ...interface{}) {
-	if c.slogLogger != nil {
-		c.slogLogger.Debug(fmt.Sprintf(format, v...))
-	}
-}
-
 // logInfo logs an informational message (normal operations).
 func (c *Client) logInfo(format string, v ...interface{}) {
 	c.mu.Lock()
@@ -952,6 +945,7 @@ func New(hostname string, cfg Config) (*Client, error) {
 			CCachePath:   cfg.CCachePath,
 			Credentials:  &creds,
 			UseSSO:       auth.SupportsSSO() && cfg.Username == "",
+			SSPIPackage:  auth.SSPIPackageNegotiate,
 		}
 
 		provider, err := auth.NewKerberosProvider(krbCfg)
@@ -979,6 +973,7 @@ func New(hostname string, cfg Config) (*Client, error) {
 			CCachePath:   cfg.CCachePath,
 			Credentials:  &creds,
 			UseSSO:       auth.SupportsSSO() && cfg.Username == "",
+			SSPIPackage:  auth.SSPIPackageKerberos,
 		}
 
 		provider, err := auth.NewKerberosProvider(krbCfg)

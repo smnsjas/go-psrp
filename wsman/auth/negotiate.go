@@ -51,6 +51,7 @@ type negotiateRoundTripper struct {
 	base     http.RoundTripper
 	provider SecurityProvider
 	mu       sync.Mutex
+	authMu   sync.Mutex
 }
 
 // contextKey is a context key type.
@@ -67,6 +68,9 @@ const (
 	winrmProtocol     = "application/HTTP-SPNEGO-session-encrypted"
 	winrmContentType  = "multipart/encrypted;protocol=\"" + winrmProtocol + "\";boundary=\"Encrypted Boundary\""
 	winrmOriginalType = "application/soap+xml;charset=UTF-8"
+	// maxEncryptedResponseSize bounds encrypted HTTP responses to avoid memory exhaustion.
+	// WSMan MaxEnvelopeSize is set to 512000 bytes elsewhere; allow overhead for encryption/multipart.
+	maxEncryptedResponseSize = 1024 * 1024 // 1MB
 )
 
 // wrapWinRMMultipart wraps encrypted data in WinRM's multipart/encrypted MIME format.
@@ -196,8 +200,6 @@ func (rt *negotiateRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 		}
 	}
 
-	slog.Debug("Negotiate: Request details", "scheme", req.URL.Scheme, "authComplete", rt.provider.Complete(), "hasBody", len(bodyBytes) > 0)
-
 	// SPECIAL HANDLING FOR HTTP KERBEROS:
 	// We cannot simply encrypt headers and send. We must establish the security context first.
 	// If the context is NOT complete, we must trigger the auth flow with an empty body first.
@@ -260,7 +262,6 @@ func (rt *negotiateRoundTripper) roundTripInternal(req *http.Request, bodyBytes 
 			slog.Error("Negotiate: Encryption FAILED", "error", err)
 			return nil, fmt.Errorf("encrypt request body: %w", err)
 		}
-		slog.Debug("Negotiate: Encryption SUCCESS", "encryptedLen", len(encrypted))
 
 		// Wrap in WinRM multipart/encrypted format
 		multipartBody, contentType := wrapWinRMMultipart(encrypted, len(bodyBytes))
@@ -272,8 +273,6 @@ func (rt *negotiateRoundTripper) roundTripInternal(req *http.Request, bodyBytes 
 		req.GetBody = func() (io.ReadCloser, error) {
 			return io.NopCloser(bytes.NewReader(multipartBody)), nil
 		}
-
-		slog.Debug("Negotiate: Sending encrypted multipart request", "multipartLen", len(multipartBody))
 
 		// Send the encrypted request directly (skip auth loop)
 		resp, err := rt.base.RoundTrip(req)
@@ -295,11 +294,14 @@ func (rt *negotiateRoundTripper) roundTripInternal(req *http.Request, bodyBytes 
 		isEncryptedResponse := strings.Contains(respContentType, "multipart/encrypted")
 
 		if isEncryptedResponse {
-			slog.Debug("Negotiate: Received encrypted response", "contentType", respContentType)
-			respBody, err := io.ReadAll(resp.Body)
+			limited := io.LimitReader(resp.Body, maxEncryptedResponseSize+1)
+			respBody, err := io.ReadAll(limited)
 			_ = resp.Body.Close()
 			if err != nil {
 				return nil, fmt.Errorf("read encrypted response: %w", err)
+			}
+			if len(respBody) > maxEncryptedResponseSize {
+				return nil, fmt.Errorf("encrypted response too large: %d bytes (limit: %d)", len(respBody), maxEncryptedResponseSize)
 			}
 
 			// Unwrap multipart
@@ -307,28 +309,28 @@ func (rt *negotiateRoundTripper) roundTripInternal(req *http.Request, bodyBytes 
 			if err != nil {
 				return nil, fmt.Errorf("unwrap multipart: %w", err)
 			}
-			slog.Debug("Negotiate: Unwrapped multipart", "payloadLen", len(encryptedPayload))
-
 			// Decrypt payload
 			decrypted, err := rt.provider.Unwrap(encryptedPayload)
 			if err != nil {
 				slog.Error("Negotiate: Decryption FAILED", "error", err)
 				return nil, fmt.Errorf("decrypt response body: %w", err)
 			}
-			slog.Debug("Negotiate: Decryption SUCCESS", "decryptedLen", len(decrypted))
 
 			// Restore original response body
 			resp.Body = io.NopCloser(bytes.NewReader(decrypted))
 			resp.ContentLength = int64(len(decrypted))
 			resp.Header.Set("Content-Type", winrmOriginalType)
 		} else {
-			slog.Info("Negotiate: Received UNENCRYPTED response (unexpected for established Kerberos context?)", "status", resp.Status)
+			slog.Warn("Negotiate: Unencrypted response after Kerberos HTTP auth", "status", resp.Status)
+			return nil, fmt.Errorf("unexpected unencrypted response for Kerberos HTTP session")
 		}
 
 		return resp, nil
 	}
 
 	// ---- LEGACY/STANDARD AUTH LOOP (HTTPS or Handshake) ----
+	rt.authMu.Lock()
+	defer rt.authMu.Unlock()
 
 	// Capture TLS connection state for CBT if applicable
 	var cbtData []byte
@@ -351,7 +353,8 @@ func (rt *negotiateRoundTripper) roundTripInternal(req *http.Request, bodyBytes 
 			cbtData = getCBTHash(&state)
 		},
 	}
-	ctx := httptrace.WithClientTrace(req.Context(), trace)
+	ctx := context.WithValue(req.Context(), ContextKeyIsHTTPS, req.URL.Scheme == "https")
+	ctx = httptrace.WithClientTrace(ctx, trace)
 
 	// Traditional challenge-response flow:
 	// 1. First request without token
