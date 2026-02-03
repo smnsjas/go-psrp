@@ -120,6 +120,7 @@ func main() {
 	verifyChecksum := flag.Bool("verify", false, "Verify file transfer with SHA256 checksum")
 	chunkSize := flag.Int("chunk-size", 0, "File transfer chunk size in bytes (0 = auto-detect based on transport: 350KB for WSMan, 1MB for HvSocket)")
 	noOverwrite := flag.Bool("no-overwrite", false, "Fail if destination file already exists")
+	concurrency := flag.Int("concurrency", 0, "Max concurrency for file transfers (0 = default: 4)")
 
 	autoReconnect := flag.Bool("auto-reconnect", false, "Enable automatic reconnection on failures")
 	useCmd := flag.Bool("cmd", false, "Use WinRS (cmd.exe) instead of PowerShell for command execution")
@@ -134,7 +135,7 @@ func main() {
 		})))
 	}
 
-	fmt.Println("PSRP Client - Codebase Fix v5 (Retry Logic)")
+	fmt.Println("PSRP Client - Codebase Fix v15 (Cleanup)")
 
 	// Validate required flags
 	// If restoring session, we don't need server or vmid flags as they come from the state file
@@ -611,6 +612,9 @@ func main() {
 		if *noOverwrite {
 			opts = append(opts, client.WithNoOverwrite(true))
 		}
+		if *concurrency > 0 {
+			opts = append(opts, client.WithMaxConcurrency(*concurrency))
+		}
 		opts = append(opts, client.WithProgressCallback(newProgressPrinter(os.Stderr)))
 
 		// Track duration
@@ -867,7 +871,9 @@ func main() {
 		}
 		fmt.Println("Disconnected successfully. You can reconnect using:")
 		if *sessionID != "" {
-			fmt.Printf("  ./psrp-client -server %s -user %s -tls -ntlm -insecure -reconnect %s -sessionid %q -poolid %q -script \"Write-Host 'Back'\"\n", *server, *username, shellID, *sessionID, poolIDVal)
+			fmt.Printf("  ./psrp-client -server %s -user %s -tls -ntlm -insecure "+
+				"-reconnect %s -sessionid %q -poolid %q -script \"Write-Host 'Back'\"\n",
+				*server, *username, shellID, *sessionID, poolIDVal)
 		} else {
 			fmt.Printf("  -reconnect %s -poolid %s\n", shellID, poolIDVal)
 		}
@@ -897,12 +903,12 @@ func newProgressPrinter(w io.Writer) func(int64, int64) {
 			return
 		}
 		percent := (float64(transferred) / float64(total)) * 100
-		if percent-lastPercent < 0.5 && time.Since(lastPrint) < 500*time.Millisecond {
+		if transferred < total && percent-lastPercent < 0.5 && time.Since(lastPrint) < 500*time.Millisecond {
 			return
 		}
 		lastPercent = percent
 		lastPrint = time.Now()
-		fmt.Fprintf(w, "\rProgress: %5.1f%% (%s/%s)", percent, formatBytes(transferred), formatBytes(total))
+		fmt.Fprintf(w, "\rProgress: %5.1f%% (%s/%s)          ", percent, formatBytes(transferred), formatBytes(total))
 		if transferred >= total {
 			fmt.Fprintln(w)
 		}

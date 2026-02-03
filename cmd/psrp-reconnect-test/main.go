@@ -1,3 +1,4 @@
+// Package main provides a test tool for PSRP session disconnect/reconnect.
 package main
 
 import (

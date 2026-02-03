@@ -5,6 +5,8 @@ package auth
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -64,18 +66,123 @@ func (p *SSPIProvider) Complete() bool {
 	return p.complete
 }
 
-// Wrap is a no-op for HTTP auth.
 func (p *SSPIProvider) Wrap(data []byte) ([]byte, error) {
-	return data, nil
+	if p.ctx == nil {
+		return nil, fmt.Errorf("cannot wrap: context not initialized")
+	}
+	if !p.complete {
+		return nil, fmt.Errorf("cannot wrap: authentication not complete")
+	}
+
+	_, maxSignature, blockSize, securityTrailer, err := p.ctx.Sizes()
+	if err != nil {
+		return nil, fmt.Errorf("query context sizes: %w", err)
+	}
+	if maxSignature == 0 {
+		return nil, fmt.Errorf("integrity services unavailable")
+	}
+
+	var buffers [3]sspi.SecBuffer
+	buffers[0].Set(sspi.SECBUFFER_TOKEN, make([]byte, securityTrailer))
+	buffers[1].Set(sspi.SECBUFFER_DATA, data)
+	buffers[2].Set(sspi.SECBUFFER_PADDING, make([]byte, blockSize))
+
+	ret := sspi.EncryptMessage(p.ctx.Handle, 0, sspi.NewSecBufferDesc(buffers[:]), 0)
+	if ret != sspi.SEC_E_OK {
+		return nil, fmt.Errorf("sspi EncryptMessage: 0x%x", uint32(ret))
+	}
+
+	token := buffers[0].Bytes()
+	ciphertext := buffers[1].Bytes()
+	padding := buffers[2].Bytes()
+
+	signatureLen := len(token)
+	if signatureLen > int(^uint32(0)) {
+		return nil, fmt.Errorf("signature length overflow: %d", signatureLen)
+	}
+
+	totalLen := 4 + signatureLen + len(ciphertext) + len(padding)
+	output := make([]byte, 0, totalLen)
+	var sigLenBytes [4]byte
+	binary.LittleEndian.PutUint32(sigLenBytes[:], uint32(signatureLen))
+	output = append(output, sigLenBytes[:]...)
+	output = append(output, token...)
+	output = append(output, ciphertext...)
+	output = append(output, padding...)
+
+	return output, nil
 }
 
-// Unwrap is a no-op for HTTP auth.
 func (p *SSPIProvider) Unwrap(data []byte) ([]byte, error) {
-	return data, nil
+	if p.ctx == nil {
+		return nil, fmt.Errorf("cannot unwrap: context not initialized")
+	}
+	if !p.complete {
+		return nil, fmt.Errorf("cannot unwrap: authentication not complete")
+	}
+	if len(data) < 4 {
+		return nil, fmt.Errorf("data too short for MS-WSMV format: %d bytes", len(data))
+	}
+
+	signatureLen := binary.LittleEndian.Uint32(data[0:4])
+	const maxSignatureLen = 100 * 1024 * 1024
+	if signatureLen > maxSignatureLen {
+		return nil, fmt.Errorf("signature length too large: %d > %d", signatureLen, maxSignatureLen)
+	}
+	if len(data) < 4+int(signatureLen) {
+		return nil, fmt.Errorf("data too short for signature: need %d, have %d", 4+int(signatureLen), len(data))
+	}
+
+	stream := data[4:]
+
+	var buffers [2]sspi.SecBuffer
+	buffers[0].Set(sspi.SECBUFFER_STREAM, stream)
+	buffers[1].Set(sspi.SECBUFFER_DATA, []byte{})
+
+	var qop uint32
+	ret := sspi.DecryptMessage(p.ctx.Handle, sspi.NewSecBufferDesc(buffers[:]), 0, &qop)
+	if ret != sspi.SEC_E_OK {
+		return nil, fmt.Errorf("sspi DecryptMessage: 0x%x", uint32(ret))
+	}
+
+	return buffers[1].Bytes(), nil
 }
 
-// ProcessResponse is a no-op for SSPI as Step handles the token processing.
+// ProcessResponse processes the final mutual authentication token (AP-REP) from the server.
 func (p *SSPIProvider) ProcessResponse(ctx context.Context, authHeader string) error {
+	if p.complete {
+		return nil
+	}
+
+	// Parse header: "Negotiate <base64token>"
+	parts := strings.SplitN(authHeader, " ", 2)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Negotiate") {
+		return nil // Not a Negotiate token or malformed
+	}
+
+	serverToken, err := base64.StdEncoding.DecodeString(strings.TrimSpace(parts[1]))
+	if err != nil {
+		return fmt.Errorf("decode token: %w", err)
+	}
+
+	if len(serverToken) == 0 {
+		return nil
+	}
+
+	slog.Debug("SSPI ProcessResponse: Processing final token", "len", len(serverToken))
+
+	// Update context with the final token
+	_, authCompleted, err := p.updateContextWithChannelBindings(serverToken)
+	if err != nil {
+		return fmt.Errorf("process response sspi update: %w", err)
+	}
+
+	// Update completion state
+	if authCompleted {
+		p.complete = true
+		slog.Debug("SSPI ProcessResponse: Authentication complete")
+	}
+
 	return nil
 }
 
@@ -254,6 +361,7 @@ func (p *SSPIProvider) Close() error {
 
 	if p.ctx != nil {
 		if err := p.ctx.Release(); err != nil {
+			slog.Warn("SSPI Release Context failed", "error", err)
 			errs = append(errs, fmt.Sprintf("context release: %v", err))
 		}
 		p.ctx = nil

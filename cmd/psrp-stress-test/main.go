@@ -1,3 +1,4 @@
+// Package main provides a stress test tool for PSRP client concurrency.
 package main
 
 import (
@@ -83,7 +84,7 @@ func main() {
 		}
 		// Set env var for legacy debug
 		if level == slog.LevelDebug {
-			os.Setenv("PSRP_DEBUG", "1")
+			_ = os.Setenv("PSRP_DEBUG", "1") // #nosec G104 -- non-critical test utility
 		}
 	}
 

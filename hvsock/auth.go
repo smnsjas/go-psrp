@@ -32,7 +32,8 @@ const (
 	clientVersion  = "VERSION_2"
 	versionPrefix  = "VERSION_"
 
-	defaultAuthTimeout = 10 * time.Second
+	defaultAuthTimeout  = 10 * time.Second
+	maxTokenResponseLen = 16 * 1024
 )
 
 // Verbose enables debug logging
@@ -73,7 +74,7 @@ func ConnectAndAuthenticate(ctx context.Context, vmID uuid.UUID, domain, user, p
 
 	// Close broker connection - we need to make a new connection to the PS process
 	brokerConn.Close()
-	debugf("Broker connection closed. Token: %q", token)
+	debugf("Broker connection closed. Token: [REDACTED len=%d]", len(token))
 
 	if token == "" {
 		return nil, fmt.Errorf("no token received from broker (legacy mode not supported)")
@@ -149,7 +150,7 @@ func authenticateWithBroker(conn net.Conn, domain, user, pass, configName string
 		domain = "localhost"
 	}
 
-	debugf("Starting broker authentication: domain=%q, user=%q, configName=%q", domain, user, configName)
+	debugf("Starting broker authentication: domain=%q, user=[REDACTED], configName=%q", domain, configName)
 
 	// Step 1: Version Exchange
 	debugf("Sending VERSION request...")
@@ -258,11 +259,11 @@ func authenticateWithBroker(conn net.Conn, domain, user, pass, configName string
 		}
 
 		// Receive token
-		tokenResp, err := receiveASCIIWithTimeout(conn, 1024, defaultAuthTimeout)
+		tokenResp, err := receiveASCIIWithTimeout(conn, maxTokenResponseLen, defaultAuthTimeout)
 		if err != nil {
 			return "", fmt.Errorf("read token: %w", err)
 		}
-		debugf("Received token response: %q", tokenResp)
+			debugf("Received token response: [REDACTED len=%d]", len(tokenResp))
 
 		if !strings.HasPrefix(tokenResp, "TOKEN ") {
 			return "", fmt.Errorf("expected token, got: %q", tokenResp)
@@ -270,6 +271,7 @@ func authenticateWithBroker(conn net.Conn, domain, user, pass, configName string
 
 		token := strings.TrimPrefix(tokenResp, "TOKEN ")
 		token = strings.TrimSpace(token)
+		debugf("Parsed token length: %d", len(token))
 
 		// Acknowledge token
 		debugf("Sending token ack (PASS)")
@@ -286,7 +288,7 @@ func authenticateWithBroker(conn net.Conn, domain, user, pass, configName string
 
 // authenticateWithToken handles the second-stage authentication (token exchange)
 func authenticateWithToken(conn net.Conn, token string) error {
-	debugf("Starting token authentication with token: %q", token)
+	debugf("Starting token authentication with token: [REDACTED len=%d]", len(token))
 
 	// Step 1: Version Exchange
 	debugf("Sending VERSION request...")
@@ -320,7 +322,7 @@ func authenticateWithToken(conn net.Conn, token string) error {
 
 	// Step 2: Send token
 	tokenMsg := "TOKEN " + token
-	debugf("Sending token: %q", tokenMsg)
+	debugf("Sending token: [REDACTED]")
 	if _, err := conn.Write([]byte(tokenMsg)); err != nil {
 		return fmt.Errorf("send token: %w", err)
 	}
@@ -330,7 +332,7 @@ func authenticateWithToken(conn net.Conn, token string) error {
 	if err != nil {
 		return fmt.Errorf("read token response: %w", err)
 	}
-	debugf("Received token response: %q", tokenResp)
+	debugf("Received token response: [REDACTED len=%d]", len(tokenResp))
 
 	if tokenResp != "PASS" {
 		return fmt.Errorf("token authentication failed: %s", tokenResp)

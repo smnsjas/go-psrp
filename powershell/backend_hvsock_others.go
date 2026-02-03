@@ -36,6 +36,7 @@ func (b *HvSocketBackend) Init(_ context.Context, _ *runspace.Pool) error {
 	return errors.New("hvsock is only supported on windows")
 }
 
+// PreparePipeline returns an error on non-Windows platforms.
 func (b *HvSocketBackend) PreparePipeline(ctx context.Context, p *pipeline.Pipeline, content string) (io.Reader, func(), error) {
 	return nil, nil, errors.New("hvsock is only supported on windows")
 }

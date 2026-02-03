@@ -32,6 +32,8 @@ func NewClient(endpoint string, tr *transport.HTTPTransport) *Client {
 func (c *Client) SetTransport(tr *transport.HTTPTransport) {
 	c.transport = tr
 }
+
+// SetSessionID sets the WSMan session ID for the client.
 func (c *Client) SetSessionID(sessionID string) {
 	c.sessionID = sessionID
 }

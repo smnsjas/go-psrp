@@ -259,6 +259,25 @@ type Config struct {
 	CircuitBreaker *CircuitBreakerPolicy
 }
 
+// IsHvSocket returns true if the client is using the HvSocket transport.
+// It checks both the configuration and the active backend implementation.
+func (c *Client) IsHvSocket() bool {
+	// Check config first
+	if c.config.Transport == TransportHvSocket {
+		return true
+	}
+
+	// Check backend type if initialized
+	// This handles cases where config might be default (WSMan) but backend is explicitly HvSocket
+	// (e.g. during certain reconnection or test scenarios)
+	if c.backend != nil {
+		_, ok := c.backend.(*powershell.HvSocketBackend)
+		return ok
+	}
+
+	return false
+}
+
 // CircuitBreakerPolicy configures the failure threshold and recovery timeout.
 type CircuitBreakerPolicy struct {
 	// Enabled activates the circuit breaker.
@@ -1002,48 +1021,8 @@ func New(hostname string, cfg Config) (*Client, error) {
 		if _, err := uuid.Parse(cfg.VMID); err != nil {
 			return nil, fmt.Errorf("invalid vmid: %w", err)
 		}
-		// Create HvSocketBackend
-		// We reuse the pool ID logic inside Connect()? No, pool ID is created in Connect().
-		// But NewHvSocketBackend takes poolID?
-		// Wait, NewHvSocketBackend signature takes poolID.
-		// But in Connect(), we generate poolID for the runspace.New call!
-		// If HvSocketBackend owns the Adapter (which needs pool ID), we should pass it AFTER creation?
-		// Or creating it in Connect()?
-		// NewHvSocketBackend currently takes poolID.
-		// Problem: RunspaceBackend.Init takes `*runspace.Pool`.
-		// `runspace.New` takes `transport`.
-		// `HvSocketBackend` Creates the transport (adapter).
-		// So `HvSocketBackend` needs `runspaceGUID` (PoolID).
 
-		// This means we must decide PoolID BEFORE creating Backend?
-		// But `Client.Connect` logic:
-		// 1. Create Backend
-		// 2. Connect
-		// 3. Get Transport
-		// 4. Create Pool (generates ID?) -> wait, runspace.New TAKES id.
-		// So we generate ID in Client.Connect before or during.
-
-		// In previous logic (WSMan), Client generates poolID.
-		// So Client should generate PoolID in Connect() and pass it?
-		// But `c.backend` is created in `New` or `Connect`?
-		// In my recent refactor of `Connect`, `c.backend` is created IN `Connect`.
-		// YES.
-
-		// So `New` function in `client.go` should NOT create backend?
-		// Wait, `New` returns `*Client`. `Client` struct has `backend` field.
-		// Currently `New` does NOT create backend. `Connect` does.
-		// But `New` sets `wsman` client.
-
-		// So in `New`, we setup `transport` variable.
-		// But for HvSocket, we don't need `transport` or `wsman` client.
-
-		// So `New` should be lighter?
-		// Existing `New` logic creates `transport.HTTPTransport` and `wsman.NewClient`.
-		// This is WSMan specific.
-
-		// If TransportHvSocket, we don't need HTTP transport.
-		// Refactor `New` to branch.
-
+		// For HvSocket, we don't need the HTTP transport or WSMan client.
 		return &Client{
 			hostname: hostname,
 			config:   cfg,
@@ -2029,15 +2008,24 @@ func (c *Client) executeAsyncHvSocket(ctx context.Context, script string) (strin
 	// The user script is executed via -EncodedCommand to avoid quote escaping issues
 	encodedUserScript := encodePowerShellScript(script)
 
-	// Create inner script that runs user command via encoded command, exports output, and creates a completion marker
-	// This prevents script injection by not directly embedding user input in string literals
-	innerScript := fmt.Sprintf(`$p="%s"; try { & powershell.exe -NoProfile -NonInteractive -EncodedCommand %s 2>&1 | Export-Clixml -Path $p -Depth 2 } finally { New-Item "${p}_done" -ItemType File -Force }`, hvSocketFile, encodedUserScript)
+	// Create inner script that runs user command via encoded command,
+	// exports output, and creates a completion marker.
+	// This prevents script injection by not directly embedding user input.
+	innerScript := fmt.Sprintf(
+		`$p="%s"; try { & powershell.exe -NoProfile -NonInteractive `+
+			`-EncodedCommand %s 2>&1 | Export-Clixml -Path $p -Depth 2 } `+
+			`finally { New-Item "${p}_done" -ItemType File -Force }`,
+		hvSocketFile, encodedUserScript)
 
 	// Encode inner script for -EncodedCommand
 	encodedInner := encodePowerShellScript(innerScript)
 
 	// Run via WMI (Win32_Process)
-	scriptToRun := fmt.Sprintf(`Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = "powershell.exe -NoProfile -NonInteractive -EncodedCommand %s" } | Out-Null`, encodedInner)
+	scriptToRun := fmt.Sprintf(
+		`Invoke-CimMethod -ClassName Win32_Process -MethodName Create `+
+			`-Arguments @{ CommandLine = "powershell.exe -NoProfile `+
+			`-NonInteractive -EncodedCommand %s" } | Out-Null`,
+		encodedInner)
 
 	psrpPipeline, err := psrpPool.CreatePipeline(scriptToRun)
 	if err != nil {

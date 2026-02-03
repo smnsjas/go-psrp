@@ -2,6 +2,7 @@ package client
 
 import (
 	"testing"
+	"time"
 )
 
 func TestValidatePaths(t *testing.T) {
@@ -171,4 +172,57 @@ func TestTransferProgress_NoCallback(t *testing.T) {
 
 	// Should not panic
 	progress.update(100)
+}
+
+// TestTokenBucket_RateLimit verifies that the token bucket enforces the rate limit.
+func TestTokenBucket_RateLimit(t *testing.T) {
+	rate := 1024.0     // 1024 bytes/sec
+	capacity := 1024.0 // Capacity must be >= needed for Wait() to succeed
+	tb := newTokenBucket(rate, capacity)
+
+	start := time.Now()
+	needed := 512
+	tb.Wait(needed)
+	elapsed := time.Since(start)
+
+	// Since it starts empty, first Wait(needed) should block until 'needed' tokens are generated.
+	// rate = 1024 tokens/sec. Needed = 512.
+	// Expected delay = 512 / 1024 = 0.5s.
+	expectedDelay := 500 * time.Millisecond
+	margin := 100 * time.Millisecond // Allow margin for OS scheduling and test execution time
+
+	if elapsed < expectedDelay-margin {
+		t.Errorf("Rate limit too fast. Elapsed: %v, Expected at least: ~%v", elapsed, expectedDelay-margin)
+	}
+}
+
+// TestTokenBucket_SlowStart verifies that the bucket starts empty (0 tokens).
+// This was a critical fix for v11/v14 stability.
+func TestTokenBucket_SlowStart(t *testing.T) {
+	tb := newTokenBucket(1000, 1000)
+	if tb.tokens != 0 {
+		t.Errorf("TokenBucket should start empty (0 tokens), got %f", tb.tokens)
+	}
+}
+
+// TestTokenBucket_Burst verifies capacity capping.
+func TestTokenBucket_Burst(t *testing.T) {
+	rate := 10000.0
+	capacity := 100.0
+	tb := newTokenBucket(rate, capacity)
+
+	// Wait randomly long enough to overfill
+	time.Sleep(100 * time.Millisecond)
+
+	// Force internal update by calling Wait(0) or checking state if visible.
+	// Wait(0) triggers the refill logic.
+	tb.Wait(0)
+
+	if tb.tokens > capacity {
+		t.Errorf("Tokens %f exceeded capacity %f", tb.tokens, capacity)
+	}
+	// Should be close to capacity (full)
+	if tb.tokens < capacity-1.0 {
+		t.Errorf("Tokens %f should be full (capacity %f)", tb.tokens, capacity)
+	}
 }

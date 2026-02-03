@@ -27,8 +27,8 @@ const ContextKeyIsHTTPS = contextKey("isHTTPS")
 
 // PureKerberosProvider implements SecurityProvider using the pure Go gokrb5 library.
 type PureKerberosProvider struct {
-	client        *client.Client
-	spnegoClient  *spnego.Client        // For HTTPS (TLS encryption)
+	client *client.Client
+
 	clientContext *spnego.ClientContext // For HTTP: strict GSS-API context from fork
 	targetSPN     string
 	isComplete    bool
@@ -404,11 +404,12 @@ func (p *PureKerberosProvider) Wrap(inputData []byte) ([]byte, error) {
 	output := bytes.NewBuffer(make([]byte, 0, totalLen))
 
 	// SignatureLength (4 bytes, little-endian)
+	// #nosec G115 -- safe cast to larger type (int->uint64) for overflow check
 	if uint64(signatureLen) > math.MaxUint32 {
 		return nil, fmt.Errorf("signature length overflow: %d", signatureLen)
 	}
-	var sigLenBytes [4]byte // Use stack-allocated array (optimization)
-	binary.LittleEndian.PutUint32(sigLenBytes[:], uint32(signatureLen))
+	var sigLenBytes [4]byte                                             // Use stack-allocated array (optimization)
+	binary.LittleEndian.PutUint32(sigLenBytes[:], uint32(signatureLen)) // #nosec G115 -- guarded by check above
 	output.Write(sigLenBytes[:])
 
 	// Signature (header + rotated checksum)

@@ -203,7 +203,7 @@ func (rm *reconnectManager) calculateBackoff(baseDelay time.Duration) time.Durat
 	}
 
 	// Add jitter: delay * (1 + random(0, jitter))
-	jitterFactor := 1.0 + (rand.Float64() * rm.policy.Jitter)
+	jitterFactor := 1.0 + (rand.Float64() * rm.policy.Jitter) // #nosec G404 -- non-crypto usage (jitter)
 	return time.Duration(float64(baseDelay) * jitterFactor)
 }
 

@@ -3,6 +3,7 @@
 package powershell
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -21,9 +22,16 @@ import (
 )
 
 var hvDebug = os.Getenv("PSRP_DEBUG") != ""
+var hvTrace = os.Getenv("PSRP_HV_TRACE") != ""
 
 func hvDebugf(format string, args ...interface{}) {
 	if hvDebug {
+		log.Printf("[hvsock-backend] "+format, args...)
+	}
+}
+
+func hvTracef(format string, args ...interface{}) {
+	if hvTrace {
 		log.Printf("[hvsock-backend] "+format, args...)
 	}
 }
@@ -38,11 +46,165 @@ type HvSocketBackend struct {
 	configName string
 
 	conn    net.Conn
-	adapter *outofproc.Adapter
+	adapter hvTransportAdapter
 	poolID  uuid.UUID
 
 	connected bool
 	closed    bool
+}
+
+type hvTransportAdapter interface {
+	io.ReadWriter
+	SendCommand(pipelineGUID uuid.UUID) error
+	SendPipelineData(pipelineGUID uuid.UUID, data []byte) error
+	SendSignal(pipelineGUID uuid.UUID) error
+	Close() error
+}
+
+type hvPacketReadWriter struct {
+	r          io.Reader
+	w          io.Writer
+	buf        []byte
+	carry      []byte
+	pendingErr error
+}
+
+type writeDeadlineReadWriter struct {
+	conn         net.Conn
+	writeTimeout time.Duration
+}
+
+func (w *writeDeadlineReadWriter) Read(p []byte) (int, error) {
+	return w.conn.Read(p)
+}
+
+func (w *writeDeadlineReadWriter) Write(p []byte) (int, error) {
+	if w.writeTimeout > 0 {
+		_ = w.conn.SetWriteDeadline(time.Now().Add(w.writeTimeout))
+	}
+	return w.conn.Write(p)
+}
+
+func (n *hvPacketReadWriter) Read(p []byte) (int, error) {
+	for len(n.buf) == 0 {
+		if n.pendingErr != nil {
+			err := n.pendingErr
+			n.pendingErr = nil
+			return 0, err
+		}
+
+		tmp := make([]byte, 32*1024)
+		readN, err := n.r.Read(tmp)
+		if readN == 0 {
+			return 0, err
+		}
+
+		hvTracef("outofproc read bytes=%d err=%v", readN, err)
+		n.carry = append(n.carry, tmp[:readN]...)
+		if bytes.Contains(n.carry, []byte("__HyperVSocketError__")) {
+			n.pendingErr = fmt.Errorf("hvsocket remote transport error")
+			n.carry = nil
+			return 0, n.pendingErr
+		}
+		out, remaining := splitOutOfProcPackets(n.carry)
+		n.carry = remaining
+		if len(out) > 0 {
+			n.buf = out
+			if err != nil {
+				n.pendingErr = err
+			}
+			break
+		}
+		if hvTrace && len(remaining) > 0 {
+			hasSelfClose := bytes.Contains(remaining, []byte("/>"))
+			hasDataClose := bytes.Contains(remaining, []byte("</Data>"))
+			previewLen := 200
+			if len(remaining) < previewLen {
+				previewLen = len(remaining)
+			}
+			hvTracef("outofproc carry len=%d selfClose=%t dataClose=%t preview=%q",
+				len(remaining), hasSelfClose, hasDataClose, string(remaining[:previewLen]))
+		}
+		if err != nil {
+			n.pendingErr = err
+		}
+	}
+
+	nn := copy(p, n.buf)
+	n.buf = n.buf[nn:]
+	return nn, nil
+}
+
+func (n *hvPacketReadWriter) Write(p []byte) (int, error) {
+	return n.w.Write(p)
+}
+
+func splitOutOfProcPackets(data []byte) ([]byte, []byte) {
+	var out []byte
+	i := 0
+	const maxSelfCloseLen = 256
+	for i < len(data) {
+		start := bytes.IndexByte(data[i:], '<')
+		if start == -1 {
+			return out, data[i:]
+		}
+		start += i
+		if start > i {
+			i = start
+		}
+		nextStart := bytes.IndexByte(data[start+1:], '<')
+		if nextStart != -1 {
+			nextStart = start + 1 + nextStart
+		}
+
+		// Detect Data packets (not DataAck)
+		if bytes.HasPrefix(data[start:], []byte("<Data ")) || bytes.HasPrefix(data[start:], []byte("<Data>")) {
+			end := bytes.Index(data[start:], []byte("</Data>"))
+			if end == -1 {
+				break
+			}
+			endPos := start + end + len("</Data>")
+			out = append(out, data[start:endPos]...)
+			out = append(out, '\n')
+			hvTracef("outofproc packet: Data len=%d", endPos-start)
+			i = endPos
+			continue
+		}
+
+		// Self-closing packets (Command, CommandAck, DataAck, Close, CloseAck, Signal, SignalAck)
+		searchEnd := len(data)
+		if max := start + maxSelfCloseLen; max < searchEnd {
+			searchEnd = max
+		}
+		end := bytes.Index(data[start:searchEnd], []byte("/>"))
+		if end == -1 {
+			break
+		}
+		endPos := start + end + 2
+		if nextStart != -1 && nextStart < endPos {
+			break
+		}
+		out = append(out, data[start:endPos]...)
+		out = append(out, '\n')
+		if hvTrace {
+			packetName := "Unknown"
+			if endPos > start+1 {
+				nameEnd := bytes.IndexByte(data[start+1:endPos], ' ')
+				if nameEnd == -1 {
+					nameEnd = bytes.IndexByte(data[start+1:endPos], '/')
+				}
+				if nameEnd > 0 {
+					packetName = string(data[start+1 : start+1+nameEnd])
+				} else {
+					packetName = string(data[start+1 : endPos-2])
+				}
+			}
+			hvTracef("outofproc packet: %s len=%d", packetName, endPos-start)
+		}
+		i = endPos
+	}
+
+	return out, data[i:]
 }
 
 func NewHvSocketBackend(vmID uuid.UUID, domain, username, password, configName string, poolID uuid.UUID) *HvSocketBackend {
@@ -85,8 +247,9 @@ func (b *HvSocketBackend) Connect(ctx context.Context) error {
 
 	// Create OutOfProc Adapter
 	hvDebugf("Creating OutOfProc transport and adapter (poolID=%s)", b.poolID)
-	transport := outofproc.NewTransportFromReadWriter(conn)
-	b.adapter = outofproc.NewAdapter(transport, b.poolID)
+	rw := &writeDeadlineReadWriter{conn: conn, writeTimeout: 30 * time.Second}
+	transport := outofproc.NewTransportFromReadWriter(&hvPacketReadWriter{r: rw, w: rw})
+	b.adapter = newHvOutOfProcAdapter(transport, b.poolID, 5*time.Minute)
 	hvDebugf("Adapter created")
 
 	b.connected = true
