@@ -78,10 +78,12 @@ func TestIsRetryableError(t *testing.T) {
 }
 
 func TestCalculateRetryBackoff(t *testing.T) {
+	// No jitter for predictable testing
 	policy := &RetryPolicy{
 		InitialDelay: 100 * time.Millisecond,
 		MaxDelay:     1 * time.Second,
 		Multiplier:   2.0,
+		Jitter:       0, // Disable jitter for exact testing
 	}
 
 	tests := []struct {
@@ -139,10 +141,64 @@ func TestCalculateRetryBackoff_Defaults(t *testing.T) {
 		t.Errorf("calculateRetryBackoff(nil) = %v, want 1s", got)
 	}
 
-	// Test with explicit defaults
+	// Test with explicit defaults (has 10% jitter, so accept range)
 	policy := DefaultRetryPolicy()
 	got = calculateRetryBackoff(1, policy)
+	base := 100 * time.Millisecond
+	minExpected := time.Duration(float64(base) * 0.9) // -10%
+	maxExpected := time.Duration(float64(base) * 1.1) // +10%
+	if got < minExpected || got > maxExpected {
+		t.Errorf("calculateRetryBackoff(1) = %v, want [%v, %v]", got, minExpected, maxExpected)
+	}
+}
+
+// TestCalculateRetryBackoff_Jitter verifies jitter produces variation.
+func TestCalculateRetryBackoff_Jitter(t *testing.T) {
+	policy := &RetryPolicy{
+		InitialDelay: 1 * time.Second,
+		MaxDelay:     10 * time.Second,
+		Multiplier:   2.0,
+		Jitter:       0.2, // 20% jitter
+	}
+
+	// Run multiple iterations to verify jitter produces variation
+	results := make(map[time.Duration]bool)
+	for i := 0; i < 100; i++ {
+		got := calculateRetryBackoff(1, policy)
+		results[got] = true
+
+		// Verify within expected range (±20%)
+		base := 1 * time.Second
+		minExpected := time.Duration(float64(base) * 0.8)
+		maxExpected := time.Duration(float64(base) * 1.2)
+		if got < minExpected || got > maxExpected {
+			t.Errorf("calculateRetryBackoff() = %v, want [%v, %v]", got, minExpected, maxExpected)
+		}
+	}
+
+	// Verify we got variation (at least 2 different values in 100 iterations)
+	if len(results) < 2 {
+		t.Errorf("Jitter should produce variation, got only %d unique values", len(results))
+	}
+}
+
+// TestApplyJitter verifies jitter edge cases.
+func TestApplyJitter(t *testing.T) {
+	// Zero jitter should return exact value
+	got := applyJitter(100*time.Millisecond, 0)
 	if got != 100*time.Millisecond {
-		t.Errorf("calculateRetryBackoff(1) = %v, want 100ms", got)
+		t.Errorf("applyJitter(100ms, 0) = %v, want 100ms", got)
+	}
+
+	// Negative jitter should return exact value
+	got = applyJitter(100*time.Millisecond, -0.1)
+	if got != 100*time.Millisecond {
+		t.Errorf("applyJitter(100ms, -0.1) = %v, want 100ms", got)
+	}
+
+	// Jitter > 1.0 should return exact value
+	got = applyJitter(100*time.Millisecond, 1.5)
+	if got != 100*time.Millisecond {
+		t.Errorf("applyJitter(100ms, 1.5) = %v, want 100ms", got)
 	}
 }

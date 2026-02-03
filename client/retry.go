@@ -2,6 +2,8 @@ package client
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"io"
 	"math"
@@ -56,7 +58,7 @@ func isRetryableError(err error) bool {
 		strings.Contains(errStr, "broken pipe")
 }
 
-// calculateRetryBackoff computes exponential backoff with cap.
+// calculateRetryBackoff computes exponential backoff with cap and optional jitter.
 func calculateRetryBackoff(attempt int, policy *RetryPolicy) time.Duration {
 	if policy == nil {
 		return time.Second
@@ -68,7 +70,7 @@ func calculateRetryBackoff(attempt int, policy *RetryPolicy) time.Duration {
 	}
 
 	if attempt <= 1 {
-		return delay
+		return applyJitter(delay, policy.Jitter)
 	}
 
 	// Calculate exponential backoff: delay * (multiplier ^ (attempt - 1))
@@ -86,8 +88,42 @@ func calculateRetryBackoff(attempt int, policy *RetryPolicy) time.Duration {
 		if backoff <= 0 {
 			backoff = 5 * time.Second
 		}
-		return backoff
+		return applyJitter(backoff, policy.Jitter)
 	}
 
-	return time.Duration(backoffFloat)
+	return applyJitter(time.Duration(backoffFloat), policy.Jitter)
+}
+
+// applyJitter adds random variation to a duration to prevent thundering herd.
+// jitterFactor is a value between 0.0 and 1.0 representing the ± variation.
+// Example: jitterFactor=0.1 means ±10% variation.
+func applyJitter(d time.Duration, jitterFactor float64) time.Duration {
+	if jitterFactor <= 0 || jitterFactor > 1.0 {
+		return d
+	}
+
+	// Get cryptographically secure random float in [0, 1)
+	randFloat := cryptoRandFloat64()
+
+	// Convert to range [-1, 1) and apply jitter factor
+	jitterRange := float64(d) * jitterFactor
+	jitter := (randFloat*2 - 1) * jitterRange
+
+	result := time.Duration(float64(d) + jitter)
+	if result < 0 {
+		return 0
+	}
+	return result
+}
+
+// cryptoRandFloat64 returns a cryptographically secure random float64 in [0, 1).
+// Uses crypto/rand per golang-expert security guidelines.
+func cryptoRandFloat64() float64 {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// Fallback to neutral (no jitter) on error - should never happen
+		return 0.5
+	}
+	// Convert to uint64 and normalize to [0, 1)
+	return float64(binary.LittleEndian.Uint64(b[:])) / float64(math.MaxUint64)
 }

@@ -139,6 +139,11 @@ type RetryPolicy struct {
 	// Multiplier is the backoff multiplier.
 	// Default: 2.0.
 	Multiplier float64
+
+	// Jitter adds randomness to backoff delay to prevent thundering herd.
+	// Value is a factor (0.0-1.0). Example: 0.1 means ±10% variation.
+	// Default: 0.1.
+	Jitter float64
 }
 
 // DefaultRetryPolicy returns a conservative default retry policy.
@@ -149,6 +154,7 @@ func DefaultRetryPolicy() *RetryPolicy {
 		InitialDelay: 100 * time.Millisecond,
 		MaxDelay:     5 * time.Second,
 		Multiplier:   2.0,
+		Jitter:       0.1, // 10% jitter to prevent thundering herd
 	}
 }
 

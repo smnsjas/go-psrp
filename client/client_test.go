@@ -22,8 +22,8 @@ func TestConfig_Defaults(t *testing.T) {
 	if cfg.UseTLS {
 		t.Error("UseTLS should be false by default")
 	}
-	if cfg.Timeout != 60*time.Second {
-		t.Errorf("Timeout = %v, want 60s", cfg.Timeout)
+	if cfg.Timeout != 120*time.Second {
+		t.Errorf("Timeout = %v, want 120s", cfg.Timeout)
 	}
 }
 
