@@ -109,6 +109,7 @@ func main() {
 	retryAttempts := flag.Int("retry-attempts", 0, "Max command retry attempts (default: 0 = disabled)")
 	retryDelay := flag.Duration("retry-delay", 100*time.Millisecond, "Initial retry delay")
 	retryMaxDelay := flag.Duration("retry-max-delay", 5*time.Second, "Max retry delay")
+	retryMaxDuration := flag.Duration("retry-max-duration", 0, "Max total retry duration (0 = unlimited)")
 
 	// Circuit Breaker flags
 	breakerThreshold := flag.Int("breaker-threshold", 5, "Circuit Breaker failure threshold (0 to disable)")
@@ -268,8 +269,11 @@ func main() {
 		if *retryMaxDelay > 0 {
 			cfg.Retry.MaxDelay = *retryMaxDelay
 		}
-		fmt.Printf("Command Retry: Enabled (attempts=%d, delay=%v, max=%v)\n",
-			cfg.Retry.MaxAttempts, cfg.Retry.InitialDelay, cfg.Retry.MaxDelay)
+		if *retryMaxDuration > 0 {
+			cfg.Retry.MaxDuration = *retryMaxDuration
+		}
+		fmt.Printf("Command Retry: Enabled (attempts=%d, delay=%v, max=%v, duration=%v)\n",
+			cfg.Retry.MaxAttempts, cfg.Retry.InitialDelay, cfg.Retry.MaxDelay, cfg.Retry.MaxDuration)
 	}
 
 	// Configure Circuit Breaker

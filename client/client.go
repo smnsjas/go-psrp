@@ -144,6 +144,12 @@ type RetryPolicy struct {
 	// Value is a factor (0.0-1.0). Example: 0.1 means ±10% variation.
 	// Default: 0.1.
 	Jitter float64
+
+	// MaxDuration is the maximum total time for all retry attempts.
+	// If set, retries stop when this duration expires regardless of MaxAttempts.
+	// Zero means no duration limit.
+	// Default: 0 (no limit).
+	MaxDuration time.Duration
 }
 
 // DefaultRetryPolicy returns a conservative default retry policy.
@@ -1667,8 +1673,27 @@ func (c *Client) Execute(ctx context.Context, script string) (*Result, error) {
 	// Wrap execution logic in Circuit Breaker
 	operation := func() error {
 		var lastErr error
+		retryStartTime := time.Now()
 
 		for attempt := 1; attempt <= maxAttempts; attempt++ {
+			// Check MaxDuration before each attempt (except first)
+			if attempt > 1 && retryPolicy != nil && retryPolicy.MaxDuration > 0 {
+				elapsed := time.Since(retryStartTime)
+				if elapsed > retryPolicy.MaxDuration {
+					c.logError("Execute failed (max duration %v exceeded after %d attempts): %v",
+						retryPolicy.MaxDuration, attempt-1, lastErr)
+					if c.securityLogger != nil {
+						c.securityLogger.LogCommand(SubtypeCommandFailed, OutcomeFailure, SeverityError, map[string]any{
+							"error":        lastErr.Error(),
+							"attempts":     attempt - 1,
+							"max_duration": retryPolicy.MaxDuration.String(),
+							"elapsed":      elapsed.String(),
+						})
+					}
+					return fmt.Errorf("retry max duration exceeded after %d attempts: %w", attempt-1, lastErr)
+				}
+			}
+
 			// Try execute with reconnection handling
 			res, err := c.executeWithReconnectHandling(ctx, script)
 			if err == nil {
