@@ -230,3 +230,88 @@ func TestCircuitBreaker_EventCallbacks(t *testing.T) {
 	}
 	mu.Unlock()
 }
+
+// TestCircuitBreaker_SuccessThreshold verifies multiple successes required before closing.
+func TestCircuitBreaker_SuccessThreshold(t *testing.T) {
+	mc := newMockClock(time.Now())
+
+	policy := &CircuitBreakerPolicy{
+		Enabled:          true,
+		FailureThreshold: 1,
+		ResetTimeout:     100 * time.Millisecond,
+		SuccessThreshold: 3, // Require 3 consecutive successes
+	}
+	cb := NewCircuitBreaker(policy)
+	cb.clock = mc
+
+	// 1. Trip breaker
+	cb.Execute(func() error { return errors.New("fail") })
+	if cb.State() != StateOpen {
+		t.Fatalf("Failed to open breaker")
+	}
+
+	// 2. Advance time past timeout
+	mc.Advance(150 * time.Millisecond)
+
+	// 3. First success - should stay Half-Open
+	cb.Execute(func() error { return nil })
+	if cb.State() != StateHalfOpen {
+		t.Errorf("After 1 success state = %v, want Half-Open", cb.State())
+	}
+
+	// 4. Second success - should stay Half-Open
+	cb.Execute(func() error { return nil })
+	if cb.State() != StateHalfOpen {
+		t.Errorf("After 2 successes state = %v, want Half-Open", cb.State())
+	}
+
+	// 5. Third success - NOW should close
+	cb.Execute(func() error { return nil })
+	if cb.State() != StateClosed {
+		t.Errorf("After 3 successes state = %v, want Closed", cb.State())
+	}
+}
+
+// TestCircuitBreaker_SuccessThreshold_Reset verifies failure resets success count.
+func TestCircuitBreaker_SuccessThreshold_Reset(t *testing.T) {
+	mc := newMockClock(time.Now())
+
+	policy := &CircuitBreakerPolicy{
+		Enabled:          true,
+		FailureThreshold: 1,
+		ResetTimeout:     100 * time.Millisecond,
+		SuccessThreshold: 3,
+	}
+	cb := NewCircuitBreaker(policy)
+	cb.clock = mc
+
+	// Trip breaker
+	cb.Execute(func() error { return errors.New("fail") })
+
+	// Advance time past timeout
+	mc.Advance(150 * time.Millisecond)
+
+	// Two successes
+	cb.Execute(func() error { return nil })
+	cb.Execute(func() error { return nil })
+	if cb.State() != StateHalfOpen {
+		t.Errorf("After 2 successes state = %v, want Half-Open", cb.State())
+	}
+
+	// Failure resets counter and goes back to Open
+	cb.Execute(func() error { return errors.New("fail") })
+	if cb.State() != StateOpen {
+		t.Errorf("After failure in half-open state = %v, want Open", cb.State())
+	}
+
+	// Advance again, start fresh
+	mc.Advance(150 * time.Millisecond)
+
+	// Now need 3 fresh successes
+	cb.Execute(func() error { return nil })
+	cb.Execute(func() error { return nil })
+	cb.Execute(func() error { return nil })
+	if cb.State() != StateClosed {
+		t.Errorf("After 3 fresh successes state = %v, want Closed", cb.State())
+	}
+}

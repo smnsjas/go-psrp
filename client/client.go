@@ -303,6 +303,11 @@ type CircuitBreakerPolicy struct {
 	// Default: 30s.
 	ResetTimeout time.Duration
 
+	// SuccessThreshold is the number of consecutive successes required in Half-Open
+	// state before transitioning to Closed. Prevents premature recovery.
+	// Default: 1.
+	SuccessThreshold int
+
 	// OnStateChange is called when the circuit breaker state changes.
 	// Called asynchronously to prevent blocking.
 	OnStateChange func(from, to CircuitState)
@@ -323,6 +328,7 @@ func DefaultCircuitBreakerPolicy() *CircuitBreakerPolicy {
 		Enabled:          true,
 		FailureThreshold: 5,
 		ResetTimeout:     30 * time.Second,
+		SuccessThreshold: 1, // Single success by default (backward compatible)
 	}
 }
 

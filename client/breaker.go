@@ -41,13 +41,15 @@ type CircuitBreaker struct {
 
 	state       CircuitState
 	failures    int
+	successes   int // Consecutive successes in half-open state
 	lastFailure time.Time
 
 	// Policy
-	threshold int
-	timeout   time.Duration
-	enabled   bool
-	clock     Clock
+	threshold        int
+	successThreshold int
+	timeout          time.Duration
+	enabled          bool
+	clock            Clock
 
 	// Event callbacks
 	onStateChange func(from, to CircuitState)
@@ -61,16 +63,21 @@ func NewCircuitBreaker(policy *CircuitBreakerPolicy) *CircuitBreaker {
 	if policy == nil {
 		return &CircuitBreaker{enabled: false, clock: realClock{}}
 	}
+	successThreshold := policy.SuccessThreshold
+	if successThreshold < 1 {
+		successThreshold = 1 // Minimum 1 success required
+	}
 	return &CircuitBreaker{
-		state:         StateClosed,
-		threshold:     policy.FailureThreshold,
-		timeout:       policy.ResetTimeout,
-		enabled:       policy.Enabled,
-		clock:         realClock{},
-		onStateChange: policy.OnStateChange,
-		onOpen:        policy.OnOpen,
-		onClose:       policy.OnClose,
-		onHalfOpen:    policy.OnHalfOpen,
+		state:            StateClosed,
+		threshold:        policy.FailureThreshold,
+		successThreshold: successThreshold,
+		timeout:          policy.ResetTimeout,
+		enabled:          policy.Enabled,
+		clock:            realClock{},
+		onStateChange:    policy.OnStateChange,
+		onOpen:           policy.OnOpen,
+		onClose:          policy.OnClose,
+		onHalfOpen:       policy.OnHalfOpen,
 	}
 }
 
@@ -122,6 +129,11 @@ func (cb *CircuitBreaker) transitionToLocked(newState CircuitState) {
 	oldState := cb.state
 	cb.state = newState
 
+	// Reset counters on state change
+	if newState == StateHalfOpen {
+		cb.successes = 0 // Reset success counter when entering half-open
+	}
+
 	// Fire callbacks asynchronously to prevent blocking
 	if cb.onStateChange != nil {
 		go cb.onStateChange(oldState, newState)
@@ -151,8 +163,13 @@ func (cb *CircuitBreaker) updateState(err error) {
 	if err == nil {
 		// Success
 		if cb.state == StateHalfOpen {
-			cb.transitionToLocked(StateClosed)
-			cb.failures = 0
+			cb.successes++
+			// Only close if we've reached the success threshold
+			if cb.successes >= cb.successThreshold {
+				cb.transitionToLocked(StateClosed)
+				cb.failures = 0
+				cb.successes = 0
+			}
 		} else if cb.state == StateClosed {
 			cb.failures = 0
 		}
@@ -171,6 +188,7 @@ func (cb *CircuitBreaker) updateState(err error) {
 	// Actually, if Retry fails, it returns error. That IS a failure.
 
 	cb.failures++
+	cb.successes = 0 // Reset successes on any failure
 	cb.lastFailure = cb.clock.Now()
 
 	if cb.state == StateHalfOpen {
