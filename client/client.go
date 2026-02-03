@@ -302,6 +302,19 @@ type CircuitBreakerPolicy struct {
 	// ResetTimeout is the duration to wait before testing the connection (Half-Open).
 	// Default: 30s.
 	ResetTimeout time.Duration
+
+	// OnStateChange is called when the circuit breaker state changes.
+	// Called asynchronously to prevent blocking.
+	OnStateChange func(from, to CircuitState)
+
+	// OnOpen is called when the circuit opens (too many failures).
+	OnOpen func()
+
+	// OnClose is called when the circuit closes (recovery successful).
+	OnClose func()
+
+	// OnHalfOpen is called when the circuit enters half-open state.
+	OnHalfOpen func()
 }
 
 // DefaultCircuitBreakerPolicy returns sensible defaults.

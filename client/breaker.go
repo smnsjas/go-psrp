@@ -48,6 +48,12 @@ type CircuitBreaker struct {
 	timeout   time.Duration
 	enabled   bool
 	clock     Clock
+
+	// Event callbacks
+	onStateChange func(from, to CircuitState)
+	onOpen        func()
+	onClose       func()
+	onHalfOpen    func()
 }
 
 // NewCircuitBreaker creates a new circuit breaker with the given policy.
@@ -56,11 +62,15 @@ func NewCircuitBreaker(policy *CircuitBreakerPolicy) *CircuitBreaker {
 		return &CircuitBreaker{enabled: false, clock: realClock{}}
 	}
 	return &CircuitBreaker{
-		state:     StateClosed,
-		threshold: policy.FailureThreshold,
-		timeout:   policy.ResetTimeout,
-		enabled:   policy.Enabled,
-		clock:     realClock{},
+		state:         StateClosed,
+		threshold:     policy.FailureThreshold,
+		timeout:       policy.ResetTimeout,
+		enabled:       policy.Enabled,
+		clock:         realClock{},
+		onStateChange: policy.OnStateChange,
+		onOpen:        policy.OnOpen,
+		onClose:       policy.OnClose,
+		onHalfOpen:    policy.OnHalfOpen,
 	}
 }
 
@@ -89,7 +99,7 @@ func (cb *CircuitBreaker) checkState() error {
 	if cb.state == StateOpen {
 		// Check if timeout has expired
 		if cb.clock.Now().Sub(cb.lastFailure) > cb.timeout {
-			cb.state = StateHalfOpen
+			cb.transitionToLocked(StateHalfOpen)
 			return nil
 		}
 		return ErrCircuitOpen
@@ -103,6 +113,36 @@ func (cb *CircuitBreaker) checkState() error {
 	return nil
 }
 
+// transitionToLocked changes state and fires callbacks.
+// Must be called with cb.mu held.
+func (cb *CircuitBreaker) transitionToLocked(newState CircuitState) {
+	if cb.state == newState {
+		return
+	}
+	oldState := cb.state
+	cb.state = newState
+
+	// Fire callbacks asynchronously to prevent blocking
+	if cb.onStateChange != nil {
+		go cb.onStateChange(oldState, newState)
+	}
+
+	switch newState {
+	case StateOpen:
+		if cb.onOpen != nil {
+			go cb.onOpen()
+		}
+	case StateClosed:
+		if cb.onClose != nil {
+			go cb.onClose()
+		}
+	case StateHalfOpen:
+		if cb.onHalfOpen != nil {
+			go cb.onHalfOpen()
+		}
+	}
+}
+
 // updateState updates the breaker state based on the result of the operation.
 func (cb *CircuitBreaker) updateState(err error) {
 	cb.mu.Lock()
@@ -111,7 +151,7 @@ func (cb *CircuitBreaker) updateState(err error) {
 	if err == nil {
 		// Success
 		if cb.state == StateHalfOpen {
-			cb.state = StateClosed
+			cb.transitionToLocked(StateClosed)
 			cb.failures = 0
 		} else if cb.state == StateClosed {
 			cb.failures = 0
@@ -134,12 +174,12 @@ func (cb *CircuitBreaker) updateState(err error) {
 	cb.lastFailure = cb.clock.Now()
 
 	if cb.state == StateHalfOpen {
-		cb.state = StateOpen
+		cb.transitionToLocked(StateOpen)
 		return
 	}
 
 	if cb.state == StateClosed && cb.failures >= cb.threshold {
-		cb.state = StateOpen
+		cb.transitionToLocked(StateOpen)
 	}
 }
 

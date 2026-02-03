@@ -155,3 +155,78 @@ func TestCircuitBreaker_Concurrency(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// TestCircuitBreaker_EventCallbacks verifies event callbacks are fired on state changes.
+func TestCircuitBreaker_EventCallbacks(t *testing.T) {
+	// Create mock clock
+	mc := newMockClock(time.Now())
+
+	// Track callbacks
+	var mu sync.Mutex
+	var stateChanges []struct{ from, to CircuitState }
+	var openCount, closeCount, halfOpenCount int
+
+	policy := &CircuitBreakerPolicy{
+		Enabled:          true,
+		FailureThreshold: 2,
+		ResetTimeout:     100 * time.Millisecond,
+		OnStateChange: func(from, to CircuitState) {
+			mu.Lock()
+			stateChanges = append(stateChanges, struct{ from, to CircuitState }{from, to})
+			mu.Unlock()
+		},
+		OnOpen: func() {
+			mu.Lock()
+			openCount++
+			mu.Unlock()
+		},
+		OnClose: func() {
+			mu.Lock()
+			closeCount++
+			mu.Unlock()
+		},
+		OnHalfOpen: func() {
+			mu.Lock()
+			halfOpenCount++
+			mu.Unlock()
+		},
+	}
+	cb := NewCircuitBreaker(policy)
+	cb.clock = mc
+
+	// 1. Two failures -> Open
+	cb.Execute(func() error { return errors.New("fail") })
+	cb.Execute(func() error { return errors.New("fail") })
+
+	// Wait for async callbacks
+	time.Sleep(10 * time.Millisecond)
+
+	mu.Lock()
+	if openCount != 1 {
+		t.Errorf("OnOpen called %d times, want 1", openCount)
+	}
+	if len(stateChanges) < 1 || stateChanges[0].to != StateOpen {
+		t.Errorf("Expected state change to Open, got %v", stateChanges)
+	}
+	mu.Unlock()
+
+	// 2. Advance time -> Half-Open
+	mc.Advance(150 * time.Millisecond)
+	cb.Execute(func() error { return nil }) // Probe succeeds -> Closed
+
+	// Wait for async callbacks
+	time.Sleep(10 * time.Millisecond)
+
+	mu.Lock()
+	if halfOpenCount != 1 {
+		t.Errorf("OnHalfOpen called %d times, want 1", halfOpenCount)
+	}
+	if closeCount != 1 {
+		t.Errorf("OnClose called %d times, want 1", closeCount)
+	}
+	// State changes: Closed->Open, Open->HalfOpen, HalfOpen->Closed
+	if len(stateChanges) != 3 {
+		t.Errorf("Expected 3 state changes, got %d: %v", len(stateChanges), stateChanges)
+	}
+	mu.Unlock()
+}

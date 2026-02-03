@@ -276,23 +276,23 @@ func main() {
 			cfg.Retry.MaxAttempts, cfg.Retry.InitialDelay, cfg.Retry.MaxDelay, cfg.Retry.MaxDuration)
 	}
 
-	// Configure Circuit Breaker
+	// Configure Circuit Breaker with event logging
 	if *breakerThreshold > 0 {
 		cfg.CircuitBreaker = client.DefaultCircuitBreakerPolicy()
 		cfg.CircuitBreaker.FailureThreshold = *breakerThreshold
 		cfg.CircuitBreaker.ResetTimeout = *breakerTimeout
-		fmt.Printf("Circuit Breaker: Enabled (threshold=%d, timeout=%v)\n",
-			cfg.CircuitBreaker.FailureThreshold, cfg.CircuitBreaker.ResetTimeout)
-	} else {
-		cfg.CircuitBreaker = &client.CircuitBreakerPolicy{Enabled: false}
-		fmt.Println("Circuit Breaker: Disabled")
-	}
-
-	// Configure Circuit Breaker
-	if *breakerThreshold > 0 {
-		cfg.CircuitBreaker = client.DefaultCircuitBreakerPolicy()
-		cfg.CircuitBreaker.FailureThreshold = *breakerThreshold
-		cfg.CircuitBreaker.ResetTimeout = *breakerTimeout
+		cfg.CircuitBreaker.OnStateChange = func(from, to client.CircuitState) {
+			fmt.Printf("[CircuitBreaker] State changed: %s -> %s\n", from, to)
+		}
+		cfg.CircuitBreaker.OnOpen = func() {
+			fmt.Println("[CircuitBreaker] OPEN - failing fast until timeout")
+		}
+		cfg.CircuitBreaker.OnHalfOpen = func() {
+			fmt.Println("[CircuitBreaker] HALF-OPEN - probing...")
+		}
+		cfg.CircuitBreaker.OnClose = func() {
+			fmt.Println("[CircuitBreaker] CLOSED - recovered!")
+		}
 		fmt.Printf("Circuit Breaker: Enabled (threshold=%d, timeout=%v)\n",
 			cfg.CircuitBreaker.FailureThreshold, cfg.CircuitBreaker.ResetTimeout)
 	} else {
