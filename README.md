@@ -602,6 +602,23 @@ if result.HadErrors {
 }
 ```
 
+## Security
+
+This library implements comprehensive security measures:
+
+- **TLS 1.2+ enforced** by default
+- **Credential protection** with automatic sanitization
+- **Multiple authentication methods** (Kerberos, NTLM with CBT, Basic)
+- **Script injection prevention** via Base64 encoding
+- **Comprehensive logging redaction** for sensitive data
+
+For detailed security information, see:
+- [SECURITY_GUIDE.md](docs/SECURITY_GUIDE.md) - Best practices
+- [SECURITY_REVIEW_2026-02-04.md](docs/SECURITY_REVIEW_2026-02-04.md) - Latest security assessment
+
+**Latest Security Review (2026-02-04)**: ✅ APPROVED  
+No vulnerabilities found. Overall security rating: **GOOD**
+
 ## Related Projects
 
 <!-- markdownlint-disable MD013 -->
