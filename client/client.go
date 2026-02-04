@@ -29,6 +29,14 @@ import (
 	"github.com/smnsjas/go-psrpcore/serialization"
 )
 
+// Sentinel errors for common failure scenarios.
+// Use errors.Is() to check for these conditions.
+var (
+	// ErrNotConnected is returned when an operation requires a connection
+	// but Connect() has not been called or the connection was lost.
+	ErrNotConnected = errors.New("client not connected")
+)
+
 // AuthType specifies the authentication mechanism.
 type AuthType int
 
@@ -1949,7 +1957,7 @@ func (c *Client) startPipeline(ctx context.Context, script string) (*pipeline.Pi
 	c.mu.Lock()
 	if !c.connected {
 		c.mu.Unlock()
-		return nil, nil, nil, errors.New("client not connected")
+		return nil, nil, nil, ErrNotConnected
 	}
 	if c.closed {
 		c.mu.Unlock()
@@ -2561,7 +2569,7 @@ func (c *Client) RecoverPipelineOutput(ctx context.Context, shellID, commandID s
 	c.mu.Unlock()
 
 	if backend == nil || psrpPool == nil {
-		return nil, fmt.Errorf("not connected")
+		return nil, ErrNotConnected
 	}
 
 	// Helper to collect results (reused from Execute logic)
