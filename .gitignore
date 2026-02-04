@@ -44,3 +44,6 @@ codeql-custom-queries-go/
 # beads
 .beads/
 .gitattributes
+
+# Local Scripts
+scripts/compare_pypsrp.py
