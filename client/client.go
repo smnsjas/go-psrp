@@ -286,6 +286,28 @@ type Config struct {
 	ProxyURL string
 }
 
+// LogValue implements slog.LogValuer to redact sensitive fields.
+func (c Config) LogValue() slog.Value {
+	// Common config fields
+	attrs := []slog.Attr{
+		slog.Int("Port", c.Port),
+		slog.Bool("UseTLS", c.UseTLS),
+		slog.Bool("InsecureSkipVerify", c.InsecureSkipVerify),
+		slog.String("Timeout", c.Timeout.String()),
+		slog.String("AuthType", fmt.Sprintf("%d", c.AuthType)),
+		slog.String("Username", c.Username),
+		slog.String("Password", "********"), // REDACTED
+		slog.String("Domain", c.Domain),
+		slog.String("Transport", c.Transport.String()),
+		slog.String("VMID", c.VMID),
+		slog.String("ConfigurationName", c.ConfigurationName),
+		slog.String("ResourceURI", c.ResourceURI),
+		slog.Int("MaxRunspaces", c.MaxRunspaces),
+	}
+
+	return slog.GroupValue(attrs...)
+}
+
 // IsHvSocket returns true if the client is using the HvSocket transport.
 // It checks both the configuration and the active backend implementation.
 func (c *Client) IsHvSocket() bool {

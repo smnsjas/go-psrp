@@ -3,6 +3,7 @@ package auth
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 )
 
@@ -25,6 +26,15 @@ type Credentials struct {
 
 	// Domain is the optional domain for NTLM authentication.
 	Domain string
+}
+
+// LogValue implements slog.LogValuer to redact sensitive fields.
+func (c Credentials) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("Username", c.Username),
+		slog.String("Password", "********"), // REDACTED
+		slog.String("Domain", c.Domain),
+	)
 }
 
 // Validate checks that required credential fields are populated.
