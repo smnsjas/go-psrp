@@ -1,4 +1,9 @@
-# go-psrp Project Plan
+# [ARCHIVED] Project Plan
+
+> **Note**: This document is archived and no longer maintained. It serves as historical reference only.
+> For current documentation, see `README.md` and `docs/`.
+
+## Original Title: go-psrp Project Plan
 
 ## Project Overview
 
@@ -11,7 +16,7 @@
 
 Complete PowerShell Remoting Protocol implementation for Go by adding transport layers to go-psrpcore. This project mirrors the relationship between Python's psrpcore (protocol) and pypsrp (transport + protocol).
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────┐
 │                        Your Application                         │
 └─────────────────────────────────────────────────────────────────┘
@@ -68,7 +73,7 @@ Complete PowerShell Remoting Protocol implementation for Go by adding transport 
 
 ## Project Structure
 
-```
+```text
 go-psrp/
 │
 ├── go.mod                          # module github.com/smnsjas/go-psrp
@@ -503,7 +508,7 @@ This section covers shell reuse (multiplexing) and connection resilience feature
 - Handle disconnects gracefully with configurable recovery
 - Enable resumption of long-running tasks after network failures
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────┐
 │                    FEATURE DEPENDENCIES                          │
 ├─────────────────────────────────────────────────────────────────┤
