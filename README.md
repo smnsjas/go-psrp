@@ -394,7 +394,8 @@ The library and CLI support enhanced structured logging with:
 ./psrp-client ... -loglevel info -logfile psrp.log -quiet
 ```
 
-By default, file logging rotates at 10MB and keeps 5 backups. You can configure this:
+By default, file logging rotates at 10MB and keeps 5 backups. You can
+configure this:
 
 ```bash
 ./psrp-client ... -logrotate-max-size 50 -logrotate-max-files 10
@@ -506,8 +507,10 @@ go build ./cmd/psrp-client
 
 The client includes optimized file transfer capabilities:
 
-- **Streaming Transfer**: Uses a single pipeline for high throughput (~5MB/s on HvSocket), bypassing the per-chunk overhead of standard PSRP.
-- **Transport-Aware Chunking**: Automatically selects optimal chunk sizes (256KB for WSMan, 1MB for HvSocket).
+- **Streaming Transfer**: Uses a single pipeline for high throughput (~5MB/s
+  on HvSocket), bypassing the per-chunk overhead of standard PSRP.
+- **Transport-Aware Chunking**: Automatically selects optimal chunk sizes
+  (256KB for WSMan, 1MB for HvSocket).
 - **Zero-Copy**: Minimizes memory allocations during transfer.
 - **Safety**: Use `-no-overwrite` to prevent accidental data loss.
 
@@ -583,6 +586,10 @@ Ensure these ports are open:
 ```go
 result, err := c.Execute(ctx, "Get-Process -Name nonexistent")
 if err != nil {
+    if errors.Is(err, client.ErrNotConnected) {
+        // Handle reconnection or simple error
+        log.Fatal("Client disconnected, please call Connect() first")
+    }
     // Connection or protocol error
     log.Fatal(err)
 }
