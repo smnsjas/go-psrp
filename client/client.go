@@ -1672,10 +1672,6 @@ type Result struct {
 // Execute runs a PowerShell script on the remote server.
 // The script can be any valid PowerShell code.
 // Returns the output and any errors from execution.
-// Execute runs a PowerShell script on the remote server.
-// The script can be any valid PowerShell code.
-// Returns the output and any errors from execution.
-// Returns the output and any errors from execution.
 func (c *Client) Execute(ctx context.Context, script string) (*Result, error) {
 	c.logInfo("Execute called: '%s'", sanitizeScriptForLogging(script))
 
