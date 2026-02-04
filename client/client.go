@@ -515,10 +515,17 @@ func (c *Client) ensureLogger() {
 		return
 	}
 
-	// Create logger
-	c.slogLogger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: level,
-	}))
+	// Use default logger if already configured (respects -quiet, -logfile, etc.)
+	// Only create fallback if default has no handler configured
+	defaultLogger := slog.Default()
+	if defaultLogger.Enabled(context.Background(), level) {
+		c.slogLogger = defaultLogger
+	} else {
+		// Fallback: create minimal stderr logger (for library consumers without CLI)
+		c.slogLogger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+			Level: level,
+		}))
+	}
 }
 
 // logfLocked logs a debug message assuming the client lock is already held.

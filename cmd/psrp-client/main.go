@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"github.com/smnsjas/go-psrp/client"
+	"github.com/smnsjas/go-psrp/internal/log"
 	"github.com/smnsjas/go-psrp/wsman/auth"
 	"github.com/smnsjas/go-psrpcore/serialization"
 	"golang.org/x/term"
@@ -127,14 +128,74 @@ func main() {
 	useCmd := flag.Bool("cmd", false, "Use WinRS (cmd.exe) instead of PowerShell for command execution")
 	proxyURL := flag.String("proxy", "", "HTTP proxy URL (e.g., http://proxy:8080). Use 'direct' to bypass proxy.")
 
+	// Enhanced logging flags
+	logFile := flag.String("logfile", "", "Write logs to file (in addition to stderr unless -quiet)")
+	logFormat := flag.String("logformat", "text", "Log output format: text or json")
+	quiet := flag.Bool("quiet", false, "Suppress stderr logging (only log to file)")
+	logRotateMaxSize := flag.Int("logrotate-max-size", 10, "Max size per log file in MB")
+	logRotateMaxFiles := flag.Int("logrotate-max-files", 5, "Max log backups to keep")
+
 	flag.Parse()
 
 	if *logLevel != "" {
 		_ = os.Setenv("PSRP_DEBUG", "1") // Enable legacy debug as well
+
 		level := parseLogLevel(*logLevel)
-		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+
+		var output io.Writer = os.Stderr
+
+		// Configure file output if requested
+		if *logFile != "" || os.Getenv("PSRP_LOG_FILE") != "" {
+			path := *logFile
+			if path == "" {
+				path = os.Getenv("PSRP_LOG_FILE")
+			}
+
+			// Use simple logic: if size limit provided, use rotating file
+			maxSize := int64(*logRotateMaxSize) * 1024 * 1024
+
+			rf, err := log.NewRotatingFile(path, maxSize, *logRotateMaxFiles)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error opening log file: %v\n", err)
+				os.Exit(1)
+			}
+			// Note: We don't defer rf.Close() here because main() exits only on termination
+			// and OS handles file closing.
+
+			if *quiet {
+				output = rf
+			} else {
+				output = io.MultiWriter(os.Stderr, rf)
+			}
+		} else if *quiet {
+			// -quiet without -logfile means silence
+			output = io.Discard
+		}
+
+		// Configure handler with format
+		var handler slog.Handler
+		opts := &slog.HandlerOptions{
 			Level: level,
-		})))
+			// AddSource: true, // Optional: helpful for debugging
+		}
+
+		format := strings.ToLower(*logFormat)
+		if envFormat := os.Getenv("PSRP_LOG_FORMAT"); *logFormat == "text" && envFormat != "" {
+			format = strings.ToLower(envFormat)
+		}
+
+		if format == "json" {
+			handler = slog.NewJSONHandler(output, opts)
+		} else {
+			handler = slog.NewTextHandler(output, opts)
+		}
+
+		// Wrap with security redaction middleware
+		handler = log.NewRedactingHandler(handler)
+
+		slog.SetDefault(slog.New(handler))
+
+		// If creating client later, we'll set it there too, but setting default covers global usage
 	}
 
 	fmt.Println("PSRP Client - Codebase Fix v15 (Cleanup)")
@@ -352,27 +413,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Configure structured logging if requested
-	// Configure structured logging if requested
+	// Configure structured logging if requested - use the logger already set via slog.SetDefault()
 	if *logLevel != "" {
-		var level slog.Level
-		switch strings.ToLower(*logLevel) {
-		case "debug":
-			level = slog.LevelDebug
-		case "info":
-			level = slog.LevelInfo
-		case "warn":
-			level = slog.LevelWarn
-		case "error":
-			level = slog.LevelError
-		default:
-			fmt.Fprintf(os.Stderr, "Invalid log level '%s'. Valid values: debug, info, warn, error\n", *logLevel)
-			os.Exit(1)
-		}
-
-		opts := &slog.HandlerOptions{Level: level}
-		logger := slog.New(slog.NewTextHandler(os.Stderr, opts))
-		psrp.SetSlogLogger(logger)
+		psrp.SetSlogLogger(slog.Default())
 	}
 
 	if *sessionID != "" {

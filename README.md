@@ -372,12 +372,42 @@ CLI usage:
 This library enables structured logging (DEBUG, INFO, WARN, ERROR) for both the
 client logic and the underlying PSRP protocol.
 
+### Logging Features
+
+The library and CLI support enhanced structured logging with:
+
+- **Level filtering**: debug, info, warn, error
+- **Format control**: text (console-friendly) or json (machine-readable)
+- **File output**: with built-in rotation and permissions hardening
+- **Security**: Built-in redaction of secrets (passwords, tokens, hashes)
+
+### CLI Logging
+
+```bash
+# Log to stderr (default)
+./psrp-client ... -loglevel info
+
+# Log to file (JSON format) with rotation
+./psrp-client ... -loglevel debug -logfile /var/log/psrp.log -logformat json
+
+# Quiet mode (log to file only)
+./psrp-client ... -loglevel info -logfile psrp.log -quiet
+```
+
+By default, file logging rotates at 10MB and keeps 5 backups. You can configure this:
+
+```bash
+./psrp-client ... -logrotate-max-size 50 -logrotate-max-files 10
+```
+
 ### Environment Variables
 
 Global logging can be enabled setting the `PSRP_LOG_LEVEL` environment variable:
 
 ```bash
 export PSRP_LOG_LEVEL=info  # options: debug, info, warn, error
+export PSRP_LOG_FILE=/var/log/psrp.log
+export PSRP_LOG_FORMAT=json
 ```
 
 ### Custom Logger
@@ -452,6 +482,11 @@ go build ./cmd/psrp-client
 | `-auto-reconnect` | Enable automatic reconnection on failures | `false` |
 | `-cmd` | Use WinRS (cmd.exe) instead of PowerShell | `false` |
 | `-proxy` | HTTP proxy URL (use 'direct' to bypass) | env vars |
+| `-logfile` | Write logs to file | stderr |
+| `-logformat` | Log output format (`text` or `json`) | `text` |
+| `-quiet` | Suppress stderr logging | `false` |
+| `-logrotate-max-size` | Max log size in MB | `10` |
+| `-logrotate-max-files` | Max log backups to keep | `5` |
 
 ## Package Structure
 
