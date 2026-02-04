@@ -1,0 +1,86 @@
+name: Security Scanning
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  schedule:
+    # Run weekly on Monday at 9:00 UTC
+    - cron: '0 9 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  gosec:
+    name: Security Scan with gosec
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Run gosec Security Scanner
+        uses: securego/gosec@master
+        with:
+          args: '-no-fail -fmt sarif -out gosec-results.sarif ./...'
+
+      - name: Upload gosec results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: gosec-results.sarif
+
+      - name: Run gosec (Console Output)
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          gosec -tests -fmt=text ./... || true
+
+  govulncheck:
+    name: Vulnerability Check with govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Run govulncheck
+        run: govulncheck ./...
+
+  nancy:
+    name: Dependency Vulnerability Check with Nancy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Install Nancy
+        run: |
+          curl -L -o nancy https://github.com/sonatype-nexus-community/nancy/releases/latest/download/nancy-linux-amd64
+          chmod +x nancy
+
+      - name: Run Nancy (Go module scan)
+        run: |
+          go list -json -deps ./... | ./nancy sleuth || true

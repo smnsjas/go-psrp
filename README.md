@@ -4,6 +4,8 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/smnsjas/go-psrp.svg)](https://pkg.go.dev/github.com/smnsjas/go-psrp)
 [![Go Report Card](https://goreportcard.com/badge/github.com/smnsjas/go-psrp)](https://goreportcard.com/report/github.com/smnsjas/go-psrp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![CI](https://github.com/smnsjas/go-psrp/actions/workflows/ci.yml/badge.svg)](https://github.com/smnsjas/go-psrp/actions/workflows/ci.yml)
+[![Security](https://github.com/smnsjas/go-psrp/actions/workflows/security.yml/badge.svg)](https://github.com/smnsjas/go-psrp/actions/workflows/security.yml)
 <!-- markdownlint-enable MD013 -->
 
 Complete PowerShell Remoting Protocol implementation for Go with multiple
@@ -612,7 +614,21 @@ This library implements comprehensive security measures:
 - **Script injection prevention** via Base64 encoding
 - **Comprehensive logging redaction** for sensitive data
 
+### Automated Security Scanning
+
+The repository uses multiple automated security tools:
+- **Dependabot**: Weekly dependency updates and vulnerability monitoring
+- **gosec**: Static security analysis on every commit
+- **govulncheck**: Vulnerability database checks
+- **CodeQL**: Advanced semantic code analysis
+- **Dependency Review**: PR-level dependency security checks
+
+All scans run automatically on pull requests and commits to main/master.
+
+### Security Documentation
+
 For detailed security information, see:
+- [SECURITY.md](SECURITY.md) - Security policy and reporting
 - [SECURITY_GUIDE.md](docs/SECURITY_GUIDE.md) - Best practices
 - [SECURITY_REVIEW_2026-02-04.md](docs/SECURITY_REVIEW_2026-02-04.md) - Latest security assessment
 
