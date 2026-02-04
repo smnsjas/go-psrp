@@ -125,6 +125,7 @@ func main() {
 
 	autoReconnect := flag.Bool("auto-reconnect", false, "Enable automatic reconnection on failures")
 	useCmd := flag.Bool("cmd", false, "Use WinRS (cmd.exe) instead of PowerShell for command execution")
+	proxyURL := flag.String("proxy", "", "HTTP proxy URL (e.g., http://proxy:8080). Use 'direct' to bypass proxy.")
 
 	flag.Parse()
 
@@ -258,6 +259,7 @@ func main() {
 	cfg.EnableCBT = *enableCBT
 	cfg.MaxRunspaces = *maxRunspaces
 	cfg.Reconnect.Enabled = *autoReconnect
+	cfg.ProxyURL = *proxyURL
 
 	// Configure Retry Policy
 	if *retryAttempts > 0 {

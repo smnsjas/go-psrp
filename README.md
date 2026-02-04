@@ -339,6 +339,34 @@ cfg.KeepAliveInterval = 30 * time.Second
 cfg.IdleTimeout = "PT1H"
 ```
 
+### Proxy Configuration
+
+Configure HTTP/HTTPS proxy for corporate environments:
+
+```go
+cfg := client.DefaultConfig()
+// ... auth settings ...
+
+// Use explicit proxy
+cfg.ProxyURL = "http://proxy.corp.com:8080"
+
+// Or bypass proxy entirely (ignores HTTP_PROXY env vars)
+cfg.ProxyURL = "direct"
+
+// Default (empty string): uses environment variables
+// (HTTP_PROXY, HTTPS_PROXY, NO_PROXY)
+```
+
+CLI usage:
+
+```bash
+# Use proxy
+./psrp-client -server host -user admin -tls -proxy http://proxy:8080 ...
+
+# Bypass proxy
+./psrp-client -server host -user admin -tls -proxy direct ...
+```
+
 ## Logging
 
 This library enables structured logging (DEBUG, INFO, WARN, ERROR) for both the
@@ -423,6 +451,7 @@ go build ./cmd/psrp-client
 | `-cbt` | Enable NTLM Channel Binding Tokens (Extended Protection) | `false` |
 | `-auto-reconnect` | Enable automatic reconnection on failures | `false` |
 | `-cmd` | Use WinRS (cmd.exe) instead of PowerShell | `false` |
+| `-proxy` | HTTP proxy URL (use 'direct' to bypass) | env vars |
 
 ## Package Structure
 

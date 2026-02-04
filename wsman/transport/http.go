@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"sync"
 	"time"
@@ -144,6 +145,35 @@ func WithTLSConfig(cfg *tls.Config) HTTPTransportOption {
 			cfg.MinVersion = tls.VersionTLS12
 		}
 		transport.TLSClientConfig = cfg
+	}
+}
+
+// WithProxy sets the proxy URL for the transport.
+// Supports HTTP and HTTPS proxies (e.g., "http://proxy.corp.com:8080").
+// Special values:
+//   - Empty string: uses environment variables (HTTP_PROXY, HTTPS_PROXY, NO_PROXY)
+//   - "direct": bypasses proxy entirely (ignores environment variables)
+func WithProxy(proxyURL string) HTTPTransportOption {
+	return func(t *HTTPTransport) {
+		transport := t.ensureHTTPTransport()
+
+		if proxyURL == "" {
+			// Use default behavior (respects environment variables)
+			return
+		}
+
+		if proxyURL == "direct" {
+			// Bypass proxy entirely
+			transport.Proxy = nil
+			return
+		}
+
+		parsed, err := url.Parse(proxyURL)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "WARNING: invalid proxy URL %q, ignoring: %v\n", proxyURL, err)
+			return
+		}
+		transport.Proxy = http.ProxyURL(parsed)
 	}
 }
 

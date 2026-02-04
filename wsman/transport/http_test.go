@@ -127,3 +127,39 @@ func TestHTTPTransport_Do_Error(t *testing.T) {
 		t.Error("expected connection error")
 	}
 }
+
+// TestHTTPTransport_WithProxy verifies proxy configuration.
+func TestHTTPTransport_WithProxy(t *testing.T) {
+	tests := []struct {
+		name     string
+		proxyURL string
+		wantNil  bool // true if Proxy should be nil (direct)
+	}{
+		{"empty uses defaults", "", false},
+		{"direct bypasses proxy", "direct", true},
+		{"explicit proxy URL", "http://proxy.example.com:8080", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tr := NewHTTPTransport(WithProxy(tt.proxyURL))
+
+			httpTransport, ok := tr.client.Transport.(*http.Transport)
+			if !ok {
+				t.Fatal("transport is not *http.Transport")
+			}
+
+			if tt.proxyURL == "direct" {
+				if httpTransport.Proxy != nil {
+					t.Error("expected Proxy to be nil for 'direct'")
+				}
+			} else if tt.proxyURL != "" {
+				// For explicit proxy, verify it's set
+				if httpTransport.Proxy == nil {
+					t.Error("expected Proxy to be set for explicit URL")
+				}
+			}
+			// For empty string, we don't check - it uses http.ProxyFromEnvironment (default behavior)
+		})
+	}
+}

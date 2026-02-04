@@ -269,6 +269,13 @@ type Config struct {
 	// CircuitBreaker configures the circuit breaker to fail fast when server is down.
 	// This prevents resource exhaustion by stopping requests after a threshold of failures.
 	CircuitBreaker *CircuitBreakerPolicy
+
+	// ProxyURL is the HTTP/HTTPS proxy server URL (e.g., "http://proxy.corp.com:8080").
+	// Special values:
+	//   - Empty string (default): uses environment variables (HTTP_PROXY, HTTPS_PROXY, NO_PROXY)
+	//   - "direct": bypasses proxy entirely, ignoring environment variables
+	// Only applies to WSMan transport.
+	ProxyURL string
 }
 
 // IsHvSocket returns true if the client is using the HvSocket transport.
@@ -976,6 +983,7 @@ func New(hostname string, cfg Config) (*Client, error) {
 	tr := transport.NewHTTPTransport(
 		transport.WithTimeout(cfg.Timeout),
 		transport.WithInsecureSkipVerify(cfg.InsecureSkipVerify),
+		transport.WithProxy(cfg.ProxyURL),
 	)
 
 	// Apply authentication
