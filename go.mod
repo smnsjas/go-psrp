@@ -12,7 +12,7 @@ require (
 	github.com/alexbrainman/sspi v0.0.0-20250919150558-7d374ff0d59e
 	github.com/go-krb5/krb5 v0.0.0-20251226122733-d0288459fc25
 	github.com/smnsjas/go-ntlm-cbt v0.0.0-20260107203125-46149984fac0
-	github.com/smnsjas/go-psrpcore v0.0.0-20260209151518-449d513eeaf0
+	github.com/smnsjas/go-psrpcore v0.0.0-20260213191708-886cb15e7689
 	golang.org/x/sync v0.19.0
 	golang.org/x/term v0.38.0
 )
@@ -26,5 +26,3 @@ require (
 )
 
 replace github.com/go-krb5/krb5 => github.com/smnsjas/krb5 v0.0.0-20260129173902-49e50274bc95
-
-replace github.com/smnsjas/go-psrpcore => ../go-psrpcore
