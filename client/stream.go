@@ -109,6 +109,13 @@ func (sr *StreamResult) SendInput(ctx context.Context, data interface{}) error {
 	return sr.pipeline.SendInput(ctx, data)
 }
 
+// SendInputBatch sends multiple input items to the pipeline in a single
+// transport operation. Each item becomes a separate pipeline input object,
+// but all are delivered in one HTTP round trip.
+func (sr *StreamResult) SendInputBatch(ctx context.Context, items []interface{}) error {
+	return sr.pipeline.SendInputBatch(ctx, items)
+}
+
 // CloseInput closes the pipeline input stream.
 func (sr *StreamResult) CloseInput(ctx context.Context) error {
 	return sr.pipeline.CloseInput(ctx)

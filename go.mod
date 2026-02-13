@@ -26,3 +26,5 @@ require (
 )
 
 replace github.com/go-krb5/krb5 => github.com/smnsjas/krb5 v0.0.0-20260129173902-49e50274bc95
+
+replace github.com/smnsjas/go-psrpcore => ../go-psrpcore

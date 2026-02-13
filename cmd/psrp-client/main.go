@@ -127,6 +127,9 @@ func main() {
 	autoReconnect := flag.Bool("auto-reconnect", false, "Enable automatic reconnection on failures")
 	useCmd := flag.Bool("cmd", false, "Use WinRS (cmd.exe) instead of PowerShell for command execution")
 	proxyURL := flag.String("proxy", "", "HTTP proxy URL (e.g., http://proxy:8080). Use 'direct' to bypass proxy.")
+	testBatch := flag.Int("test-batch", 0, "Send N test strings via SendInputBatch (for testing multi-stream send)")
+	testSingle := flag.Int("test-single", 0, "Send N test strings via SendInput one at a time (for comparison)")
+	benchInput := flag.Int("bench-input", 0, "Benchmark: send N items both ways and compare timing")
 
 	// Enhanced logging flags
 	logFile := flag.String("logfile", "", "Write logs to file (in addition to stderr unless -quiet)")
@@ -822,6 +825,90 @@ func main() {
 		}
 	}
 
+	// Benchmark input mode (runs independently, no -script required)
+	if *benchInput > 0 {
+		n := *benchInput
+		benchScript := `$items = @(); foreach ($line in $input) { $items += $line }; "received $($items.Count) objects"`
+
+		// --- Single mode ---
+		fmt.Printf("=== SINGLE MODE: %d items (1 HTTP POST each) ===\n", n)
+		srSingle, err := psrp.ExecuteStreamWithInput(ctx, benchScript)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		startSingle := time.Now()
+		for i := 0; i < n; i++ {
+			if err := srSingle.SendInput(ctx, fmt.Sprintf("item-%d", i)); err != nil {
+				fmt.Fprintf(os.Stderr, "SendInput error: %v\n", err)
+				os.Exit(1)
+			}
+		}
+		if err := srSingle.CloseInput(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "CloseInput error: %v\n", err)
+			os.Exit(1)
+		}
+		elapsedSingle := time.Since(startSingle)
+		for msg := range srSingle.Output {
+			deser := serialization.NewDeserializer()
+			objs, deserErr := deser.Deserialize(msg.Data)
+			if deserErr == nil && len(objs) > 0 {
+				for _, obj := range objs {
+					fmt.Printf("  %s\n", formatObject(obj))
+				}
+			}
+		}
+		if err := srSingle.Wait(); err != nil {
+			fmt.Fprintf(os.Stderr, "Pipeline error: %v\n", err)
+		}
+		fmt.Printf("  Time: %v\n\n", elapsedSingle)
+
+		// --- Batch mode ---
+		fmt.Printf("=== BATCH MODE: %d items (1 HTTP POST total) ===\n", n)
+		srBatch, err := psrp.ExecuteStreamWithInput(ctx, benchScript)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		items := make([]interface{}, n)
+		for i := range items {
+			items[i] = fmt.Sprintf("item-%d", i)
+		}
+		startBatch := time.Now()
+		if err := srBatch.SendInputBatch(ctx, items); err != nil {
+			fmt.Fprintf(os.Stderr, "SendInputBatch error: %v\n", err)
+			os.Exit(1)
+		}
+		if err := srBatch.CloseInput(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "CloseInput error: %v\n", err)
+			os.Exit(1)
+		}
+		elapsedBatch := time.Since(startBatch)
+		for msg := range srBatch.Output {
+			deser := serialization.NewDeserializer()
+			objs, deserErr := deser.Deserialize(msg.Data)
+			if deserErr == nil && len(objs) > 0 {
+				for _, obj := range objs {
+					fmt.Printf("  %s\n", formatObject(obj))
+				}
+			}
+		}
+		if err := srBatch.Wait(); err != nil {
+			fmt.Fprintf(os.Stderr, "Pipeline error: %v\n", err)
+		}
+		fmt.Printf("  Time: %v\n\n", elapsedBatch)
+
+		// Summary
+		fmt.Println("=== RESULTS ===")
+		fmt.Printf("Single: %v (%d HTTP round trips)\n", elapsedSingle, n)
+		fmt.Printf("Batch:  %v (1 HTTP round trip)\n", elapsedBatch)
+		if elapsedSingle > 0 {
+			speedup := float64(elapsedSingle) / float64(elapsedBatch)
+			fmt.Printf("Speedup: %.1fx faster\n", speedup)
+		}
+		os.Exit(0)
+	}
+
 	// Normal Execution Mode
 	if *script != "" {
 		fmt.Printf("Executing: %s\n", *script)
@@ -853,6 +940,67 @@ func main() {
 			if cmdResult.ExitCode != 0 {
 				os.Exit(cmdResult.ExitCode)
 			}
+		} else if *testBatch > 0 || *testSingle > 0 {
+			// Single test-batch or test-single mode
+			n := *testBatch
+			mode := "batch"
+			if *testSingle > 0 {
+				n = *testSingle
+				mode = "single"
+			}
+
+			sr, err := psrp.ExecuteStreamWithInput(ctx, *script)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error starting stream: %v\n", err)
+				os.Exit(1)
+			}
+
+			start := time.Now()
+			if mode == "batch" {
+				items := make([]interface{}, n)
+				for i := range items {
+					items[i] = fmt.Sprintf("batch-item-%d", i)
+				}
+				fmt.Printf("Sending %d items via SendInputBatch...\n", n)
+				if err := sr.SendInputBatch(ctx, items); err != nil {
+					fmt.Fprintf(os.Stderr, "SendInputBatch error: %v\n", err)
+					os.Exit(1)
+				}
+			} else {
+				fmt.Printf("Sending %d items via SendInput (one at a time)...\n", n)
+				for i := 0; i < n; i++ {
+					if err := sr.SendInput(ctx, fmt.Sprintf("single-item-%d", i)); err != nil {
+						fmt.Fprintf(os.Stderr, "SendInput error at item %d: %v\n", i, err)
+						os.Exit(1)
+					}
+				}
+			}
+			elapsed := time.Since(start)
+
+			if err := sr.CloseInput(ctx); err != nil {
+				fmt.Fprintf(os.Stderr, "CloseInput error: %v\n", err)
+				os.Exit(1)
+			}
+
+			// Drain output channel
+			fmt.Println("Output:")
+			for msg := range sr.Output {
+				deser := serialization.NewDeserializer()
+				objs, deserErr := deser.Deserialize(msg.Data)
+				if deserErr != nil || len(objs) == 0 {
+					fmt.Printf("  (raw) %s\n", string(msg.Data))
+				} else {
+					for _, obj := range objs {
+						fmt.Println(formatObject(obj))
+					}
+				}
+			}
+
+			if err := sr.Wait(); err != nil {
+				fmt.Fprintf(os.Stderr, "Pipeline error: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("Send time: %v (%s mode, %d items)\n", elapsed, mode, n)
 		} else {
 			// PowerShell (PSRP) execution
 			result, err := psrp.Execute(ctx, *script)

@@ -201,6 +201,18 @@ func (a *hvOutOfProcAdapter) SendPipelineData(pipelineGUID uuid.UUID, data []byt
 	return a.transport.SendData(pipelineGUID, data)
 }
 
+// SendPipelineDataBatch sends multiple data slices for a pipeline.
+// For HvSocket, this sends each slice individually since the transport
+// is a persistent connection (no HTTP round-trip overhead to batch).
+func (a *hvOutOfProcAdapter) SendPipelineDataBatch(pipelineGUID uuid.UUID, dataSlices [][]byte) error {
+	for _, data := range dataSlices {
+		if err := a.SendPipelineData(pipelineGUID, data); err != nil {
+			return fmt.Errorf("send pipeline data batch: %w", err)
+		}
+	}
+	return nil
+}
+
 func (a *hvOutOfProcAdapter) SendSignal(pipelineGUID uuid.UUID) error {
 	return a.transport.SendSignal(pipelineGUID)
 }
@@ -213,4 +225,3 @@ func (a *hvOutOfProcAdapter) Close() error {
 	}
 	return nil
 }
-

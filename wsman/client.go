@@ -17,7 +17,32 @@ type Client struct {
 	endpoint  string
 	transport *transport.HTTPTransport
 	sessionID string
+
+	// MaxSendSize is the maximum estimated SOAP body size (bytes)
+	// for a single Send request. When SendMulti accumulates streams
+	// exceeding this limit, it flushes intermediate batches.
+	// Zero means use DefaultMaxSendSize.
+	MaxSendSize int
+
+	// MaxStreamsPerSend is the maximum number of <rsp:Stream> elements
+	// per Send request. Prevents overloading the server-side provider.
+	// Zero means use DefaultMaxStreamsPerSend.
+	MaxStreamsPerSend int
 }
+
+// DefaultMaxSendSize is 450KB, leaving headroom within WinRM's
+// default 500KB MaxEnvelopeSizekb for SOAP headers (~2KB).
+const DefaultMaxSendSize = 450 * 1024
+
+// DefaultMaxStreamsPerSend caps the number of <rsp:Stream> elements
+// per Send request. WinRM providers can crash (error 1726) when
+// receiving too many streams in a single POST, even if the envelope
+// size is within limits. 100 is empirically safe.
+const DefaultMaxStreamsPerSend = 100
+
+// streamOverhead is the estimated XML wrapper bytes per <rsp:Stream>
+// element (tag names, attributes, CommandId UUID, whitespace).
+const streamOverhead = 150
 
 // NewClient creates a new WSMan client.
 func NewClient(endpoint string, tr *transport.HTTPTransport) *Client {
@@ -252,6 +277,129 @@ func (c *Client) Send(ctx context.Context, epr *EndpointReference, commandID, st
 	_, err := c.sendEnvelope(ctx, env)
 	if err != nil {
 		return fmt.Errorf("send: %w", err)
+	}
+
+	return nil
+}
+
+// SendMulti sends multiple data slices to a command's input stream.
+// Each slice becomes a separate <rsp:Stream> element. Slices are
+// automatically chunked into multiple HTTP requests if the estimated
+// envelope size would exceed MaxSendSize (default 450KB).
+//
+// If dataSlices is empty, this is a no-op. If it contains one element,
+// this behaves identically to Send.
+func (c *Client) SendMulti(ctx context.Context, epr *EndpointReference,
+	commandID, stream string, dataSlices [][]byte) error {
+
+	if len(dataSlices) == 0 {
+		return nil
+	}
+
+	// Fast path: single slice delegates to Send
+	if len(dataSlices) == 1 {
+		return c.Send(ctx, epr, commandID, stream, dataSlices[0])
+	}
+
+	maxBody := c.MaxSendSize
+	if maxBody <= 0 {
+		maxBody = DefaultMaxSendSize
+	}
+
+	maxStreams := c.MaxStreamsPerSend
+	if maxStreams <= 0 {
+		maxStreams = DefaultMaxStreamsPerSend
+	}
+
+	// sendWrapOverhead accounts for the <rsp:Send> open/close tags.
+	const sendWrapOverhead = 100
+
+	var batch [][]byte
+	// Pre-allocate batch capacity to avoid resizing
+	batchCap := len(dataSlices)
+	if maxStreams < batchCap {
+		batchCap = maxStreams
+	}
+	batch = make([][]byte, 0, batchCap)
+	batchSize := sendWrapOverhead
+
+	for _, data := range dataSlices {
+		encodedLen := base64.StdEncoding.EncodedLen(len(data))
+		streamSize := encodedLen + streamOverhead
+
+		// Flush if adding this stream would exceed size or count limits.
+		// Always allow at least one stream per batch to avoid infinite loops
+		// when a single fragment exceeds the size limit.
+		if (batchSize+streamSize > maxBody || len(batch) >= maxStreams) && len(batch) > 0 {
+			if err := c.sendStreamBatch(ctx, epr, commandID, stream, batch, batchSize); err != nil {
+				return err
+			}
+			batch = batch[:0]
+			batchSize = sendWrapOverhead
+		}
+
+		batch = append(batch, data)
+		batchSize += streamSize
+	}
+
+	// Send remaining
+	if len(batch) > 0 {
+		return c.sendStreamBatch(ctx, epr, commandID, stream, batch, batchSize)
+	}
+
+	return nil
+}
+
+// sendStreamBatch constructs and sends a single SOAP envelope containing
+// multiple <rsp:Stream> elements. estimatedSize hints at pre-allocation.
+func (c *Client) sendStreamBatch(ctx context.Context, epr *EndpointReference,
+	commandID, stream string, dataSlices [][]byte, estimatedSize int) error {
+
+	// Check context before doing work.
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
+	env := NewEnvelope().
+		WithAction(ActionSend).
+		WithTo(c.endpoint).
+		WithResourceURI(epr.ResourceURI).
+		WithMessageID("uuid:" + strings.ToUpper(uuid.New().String())).
+		WithReplyTo(AddressAnonymous).
+		WithMaxEnvelopeSize(512000).
+		WithOperationTimeout("PT60S").
+		WithSessionID(c.sessionID).
+		WithLocale("en-US").
+		WithDataLocale("en-US").
+		WithShellNamespace()
+
+	for _, s := range epr.Selectors {
+		env.WithSelector(s.Name, s.Value)
+	}
+
+	var body strings.Builder
+	body.Grow(estimatedSize) // Pre-allocate estimated capacity
+	body.WriteString(`<rsp:Send xmlns:rsp="` + NsShell + `">`)
+	for _, data := range dataSlices {
+		encoded := base64.StdEncoding.EncodeToString(data)
+		body.WriteString("\n  ")
+		if commandID != "" {
+			body.WriteString(`<rsp:Stream Name="` + stream + `" CommandId="` + commandID + `">`)
+		} else {
+			body.WriteString(`<rsp:Stream Name="` + stream + `">`)
+		}
+		body.WriteString(encoded)
+		body.WriteString(`</rsp:Stream>`)
+	}
+	body.WriteString("\n</rsp:Send>")
+
+	env.WithBody([]byte(body.String()))
+
+	_, err := c.sendEnvelope(ctx, env)
+	if err != nil {
+		return fmt.Errorf("send multi: %w", err)
 	}
 
 	return nil

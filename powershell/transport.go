@@ -216,10 +216,48 @@ func (t *WSManTransport) SendPipelineData(pipelineID uuid.UUID, data []byte) err
 	if !ok {
 		return fmt.Errorf("unknown pipeline %s: not registered", pipelineID)
 	}
-	cmdID := val.(string)
+	cmdID, ok2 := val.(string)
+	if !ok2 {
+		return fmt.Errorf("pipeline %s: command ID has unexpected type %T", pipelineID, val)
+	}
 
 	if err := t.client.Send(ctx, t.epr, cmdID, "stdin", data); err != nil {
 		return fmt.Errorf("wsman send pipeline data: %w", err)
+	}
+	return nil
+}
+
+// SendPipelineDataBatch sends multiple PSRP fragments to a specific pipeline's
+// stdin in a single HTTP round trip. Each fragment becomes a separate
+// <rsp:Stream> element within one <rsp:Send> SOAP body.
+func (t *WSManTransport) SendPipelineDataBatch(pipelineID uuid.UUID, dataSlices [][]byte) error {
+	if len(dataSlices) == 0 {
+		return nil
+	}
+
+	// Serialize writes to ensure fragments arrive in order.
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
+
+	t.mu.Lock()
+	ctx := t.ctx
+	t.mu.Unlock()
+
+	if t.client == nil {
+		return fmt.Errorf("transport not configured")
+	}
+
+	val, ok := t.pipelineIDs.Load(pipelineID)
+	if !ok {
+		return fmt.Errorf("unknown pipeline %s: not registered", pipelineID)
+	}
+	cmdID, ok2 := val.(string)
+	if !ok2 {
+		return fmt.Errorf("pipeline %s: command ID has unexpected type %T", pipelineID, val)
+	}
+
+	if err := t.client.SendMulti(ctx, t.epr, cmdID, "stdin", dataSlices); err != nil {
+		return fmt.Errorf("wsman send pipeline data batch: %w", err)
 	}
 	return nil
 }

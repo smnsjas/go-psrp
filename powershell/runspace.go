@@ -21,6 +21,7 @@ type PoolClient interface {
 	Delete(ctx context.Context, epr *wsman.EndpointReference) error
 	Command(ctx context.Context, epr *wsman.EndpointReference, commandID, arguments string) (string, error)
 	Send(ctx context.Context, epr *wsman.EndpointReference, commandID, stream string, data []byte) error
+	SendMulti(ctx context.Context, epr *wsman.EndpointReference, commandID, stream string, dataSlices [][]byte) error
 	Receive(ctx context.Context, epr *wsman.EndpointReference, commandID string) (*wsman.ReceiveResult, error)
 	Signal(ctx context.Context, epr *wsman.EndpointReference, commandID, code string) error
 	Disconnect(ctx context.Context, epr *wsman.EndpointReference) error

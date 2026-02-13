@@ -41,6 +41,10 @@ func (m *mockWSManClientForPool) Send(_ context.Context, _ *wsman.EndpointRefere
 	return nil
 }
 
+func (m *mockWSManClientForPool) SendMulti(_ context.Context, _ *wsman.EndpointReference, _, _ string, _ [][]byte) error {
+	return nil
+}
+
 func (m *mockWSManClientForPool) Receive(_ context.Context, _ *wsman.EndpointReference, _ string) (*wsman.ReceiveResult, error) {
 	return &wsman.ReceiveResult{}, nil
 }
