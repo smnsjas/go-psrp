@@ -48,3 +48,9 @@ codeql-custom-queries-go/
 
 # Local Scripts
 scripts/compare_pypsrp.py
+*.log
+test-loop*
+psrp_out*
+compare_pypsrp.py
+diff.txt
+go-psrp-project-plan.md

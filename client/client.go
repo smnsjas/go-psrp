@@ -455,8 +455,9 @@ type Client struct {
 	outputFiles map[string]string // Maps PipelineID to remote file path
 
 	// Keepalive management
-	keepAliveDone chan struct{}
-	keepAliveWg   sync.WaitGroup
+	keepAliveDone     chan struct{}
+	keepAliveWg       sync.WaitGroup
+	keepAliveFailures int
 
 	// Automatic reconnection
 	reconnectMgr *reconnectManager
@@ -1497,6 +1498,23 @@ func (c *Client) IsConnected() bool {
 	return c.connected && !c.closed
 }
 
+// closeTransport forcefully closes the underlying transport connection to immediately
+// unblock any pending Read/Write operations. It does not attempt to send PSRP Close messages.
+// This is used when the connection is deemed dead by the keepalive loop.
+func (c *Client) closeTransport() {
+	c.mu.Lock()
+	backend := c.backend
+	c.mu.Unlock()
+
+	if backend != nil {
+		// Calling Close on the backend will close the underlying socket/transport.
+		// We use a cancelled context so it skips waiting for acknowledgements.
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_ = backend.Close(ctx)
+	}
+}
+
 // State returns the current connection state of the underlying RunspacePool.
 func (c *Client) State() runspace.State {
 	c.mu.Lock()
@@ -1631,16 +1649,22 @@ func (c *Client) keepaliveLoop(interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	var availabilityCh <-chan int
+
 	for {
 		// handle stop signal
 		c.mu.Lock()
 		doneCh := c.keepAliveDone
 		pool := c.psrpPool
-
+		poolID := c.poolID
 		c.mu.Unlock()
 
 		if doneCh == nil {
 			return
+		}
+
+		if pool != nil && availabilityCh == nil {
+			availabilityCh = pool.SubscribeAvailability()
 		}
 
 		select {
@@ -1652,16 +1676,45 @@ func (c *Client) keepaliveLoop(interval time.Duration) {
 				continue
 			}
 
-			// We need a context for the send
-			// We use a short timeout so we don't block forever
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			msg := messages.NewGetAvailableRunspaces(poolID, 1)
 
-			// Send Keepalive (GET_AVAILABLE_RUNSPACES)
-			// This maintains the session and ensures connectivity.
 			c.logf("Sending Keepalive (GET_AVAILABLE_RUNSPACES)")
-			if err := pool.SendGetAvailableRunspaces(ctx); err != nil {
-				c.logWarn("Keepalive failed: %v", err)
-				// TODO: consider emitting an event or checking if connection is dead
+
+			// Always drain stale heartbeat tokens before probing
+			select {
+			case <-availabilityCh:
+			default:
+			}
+
+			if err := pool.SendMessage(ctx, msg); err != nil {
+				c.keepAliveFailures++
+				c.logWarn("Keepalive write failed (%d consecutive): %v", c.keepAliveFailures, err)
+			} else {
+				// Wait for response up to slightly less than interval
+				timeoutDuration := interval - time.Second
+				if timeoutDuration < time.Second {
+					timeoutDuration = time.Second
+				}
+
+				select {
+				case <-availabilityCh:
+					c.keepAliveFailures = 0
+				case <-time.After(timeoutDuration):
+					c.keepAliveFailures++
+					c.logWarn("Keepalive response timeout (%d consecutive)", c.keepAliveFailures)
+				case <-doneCh:
+					cancel()
+					return
+				}
+			}
+
+			// After 3 consecutive failures, assume the connection is dead and close it.
+			if c.keepAliveFailures >= 3 {
+				c.logWarn("Keepalive failed %d times consecutively, closing connection", c.keepAliveFailures)
+				c.closeTransport() // forcefully Close the underlying socket to unblock pending I/O
+				cancel()
+				return
 			}
 			cancel()
 		}
