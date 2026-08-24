@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"strings"
 	"syscall"
 	"unsafe"
@@ -97,7 +98,7 @@ func (p *SSPIProvider) Wrap(data []byte) ([]byte, error) {
 	padding := buffers[2].Bytes()
 
 	signatureLen := len(token)
-	if signatureLen > int(^uint32(0)) {
+	if uint64(signatureLen) > math.MaxUint32 {
 		return nil, fmt.Errorf("signature length overflow: %d", signatureLen)
 	}
 
